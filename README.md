@@ -6,6 +6,9 @@ Built for home lab setups where the official Nextcloud desktop client struggles 
 
 ---
 
+<img width="991" height="812" alt="obraz" src="https://github.com/user-attachments/assets/788bd535-aa50-4569-a84b-a7bec1576ca6" />
+
+
 ## Why this exists
 
 The official Nextcloud desktop client uses WebDAV chunked uploads. When a file is fully uploaded, the server must **assemble all chunks into one file** (the MOVE phase). For very large files this can take several minutes — and if the connection times out during assembly (e.g. due to Cloudflare Tunnel), the entire upload is restarted from scratch.
