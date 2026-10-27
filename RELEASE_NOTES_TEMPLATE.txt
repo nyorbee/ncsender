@@ -1,0 +1,13 @@
+ncsender v18
+
+New in this version (compared with the first release):
+- SSH host key verification: confirm the server's fingerprint on first connection; the connection is stopped before any password is sent if the key ever changes
+- Login with an SSH key file (optional passphrase), besides passwords
+- Passwords are stored in the system keyring (Windows Credential Manager) instead of the settings file; old plaintext passwords are migrated automatically; "Forget saved passwords" button
+- "Server temp dir" setting and a free-space check before uploading
+- Drag & drop of files and folders
+- Detailed upload log (~/NCSender_upload.log)
+- Many small fixes (startup window, drag & drop fallback, crash reports)
+
+Download ncsender.exe below. SHA-256: <paste the output of:  certutil -hashfile ncsender.exe SHA256 >
+The exe is not code-signed; Windows SmartScreen / antivirus may warn about it (false positive).
