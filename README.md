@@ -26,6 +26,7 @@ This tool avoids that problem entirely by sending files **directly over SSH/SFTP
 - Configurable **Server temp dir** and a **free-space check** before the upload starts
 - On failure it shows how far it got and how much space is left on the server, and writes a log
 - Clean tmp button – removes leftover temp files if an upload was interrupted
+- SSH host key verification (confirm the fingerprint on first connection; warns if it changes)
 - Remember credentials option – passwords are stored in the **system keyring** (Windows Credential Manager), never in the settings file; "Forget saved passwords" button
 - Cancel button works at any stage
 
@@ -60,7 +61,7 @@ No installation required – just run the exe.
 
 Fill in the fields in the GUI:
 
-- **Host** – SSH server IP or hostname, e.g. `192.168.1.100`
+- **Host** – SSH server IP or hostname, e.g. `192.168.1.100` (on the first connection you will be asked to confirm the server's fingerprint)
 - **Port** – SSH port, default `22`
 - **SSH User** – your Linux username
 - **Login with** – *Password*, or *Key file* (browse to your private key; fill in the passphrase if it is encrypted)
@@ -152,6 +153,9 @@ Run `files:scan` manually on the server:
 sudo -u www-data php /var/www/html/nextcloud/occ files:scan <username> --quiet
 ```
 
+**`Server host key was not trusted`**
+You answered No to the fingerprint question, or the server's key changed. Compare the fingerprint with the one on the server (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`). To reset, delete the server's line from `~/.nextcloud_sftp_uploader_known_hosts`.
+
 **`Key is encrypted`**
 Enter the key passphrase. PuTTY `.ppk` keys must be converted to OpenSSH format first.
 
@@ -162,7 +166,7 @@ Enter the key passphrase. PuTTY `.ppk` keys must be converted to OpenSSH format 
 - Passwords (SSH, key passphrase, sudo) are saved only if you tick the "Remember" boxes, and then **only in the system keyring**. The settings file `~/.nextcloud_sftp_uploader.json` (in your user folder) contains host, user and paths, but no passwords.
 - The sudo password is sent to `sudo` through a pseudo-terminal on the SSH connection.
 - Temp files are created in the temp dir with `chmod 700` (owner-only access); the directory name includes 16 random hex characters.
-- **The tool does not verify the server's SSH host key** (unknown hosts are accepted automatically). Use it only with servers and networks you trust, until host key checking is added.
+- **SSH host key verification.** The first time you connect to a server, ncsender shows its fingerprint (SHA256, same format as `ssh-keygen -lf`) and asks you to confirm it. The key is remembered in `~/.nextcloud_sftp_uploader_known_hosts`. If the key of a known server ever changes, the connection is stopped with a warning **before any password is sent**; you can then choose to trust the new key (e.g. after reinstalling the server) or abort. To forget a server, delete its line from that file.
 - `sudo` means root on your server. Use a dedicated account if you can.
 
 ---
