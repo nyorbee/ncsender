@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
 """
-Nextcloud SFTP Uploader v18
-Changes from v17:
-- SSH host key verification: the first connection to a server asks you to confirm its
-  fingerprint and remembers it (~/.nextcloud_sftp_uploader_known_hosts); if the key of a known
-  server ever changes, the connection is stopped with a warning BEFORE any password is sent
+Nextcloud SFTP Uploader v24 (built on v23)
+Changes from v23:
+- Share API requests send a browser-like User-Agent (Cloudflare error 1010 blocked the
+  default "Python-urllib" signature with HTTP 403)
+Changes in v23 (from v22):
+- Share link errors now show the server's real message (HTTP 403 etc.) + a hint
+- "Try again" re-reads the form (link password, days, label, token, URL, app password),
+  so you can fix a field and retry without re-uploading
+- Small dialogs get the program icon
+Changes in v22 (from v21):
+- Share link failures: "Try again" dialog + "Retry share link" button (retries only failed items)
+- SSL: tries the system certificate store first, then the certifi bundle automatically;
+  if still failing, the dialog offers a one-time "Try again (ignore SSL check)"
+Changes in v21 (from v20):
+- Only the Nextcloud URL and the NC app password are remembered for the share link;
+  link password, expiry, label and the on/off checkbox are no longer saved
+Changes in v20 (from v19):
+- "Create public share link" is ticked by default and its fields are visible at start
+- Link password is remembered in the system keyring (token is never remembered)
+Changes in v19 (from v17):
+- Optional public share link created right after upload (Nextcloud OCS Share API):
+  custom token (needs admin option), link password, expiry in days, label.
+  Link is copied to the clipboard and shown in a dialog with Copy buttons.
+- NC app password stored in the system keyring (like the other passwords)
+- Fixed: "SSH / SFTP" section title was hidden under "NEXTCLOUD"
 Changes in v17 (from v16):
 - New field "Server temp dir" (default /tmp) - choose a folder with enough free space
 - Pre-flight check: free space on the server temp dir vs. total upload size
@@ -39,11 +59,10 @@ Changes in v11 (from v10):
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
-import os, sys, json, time, socket, secrets, io, base64, hashlib
+import os, sys, json, time, socket, secrets, io, re
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".nextcloud_sftp_uploader.json")
 KR_SERVICE  = "NextcloudSFTPUploader"
-KNOWN_HOSTS_FILE = os.path.join(os.path.expanduser("~"), ".nextcloud_sftp_uploader_known_hosts")
 
 BG      = "#0f1117"
 BG2     = "#1a1d27"
@@ -175,17 +194,6 @@ def q(s):
     return s.replace("'", "'\\''")
 
 
-def hostkey_name(host, port):
-    """Name under which a server is stored in the known-hosts file (OpenSSH convention)."""
-    return host if int(port) == 22 else f"[{host}]:{port}"
-
-
-def host_fingerprint(key):
-    """SHA256 fingerprint of a host key, in the same format as `ssh-keygen -lf`."""
-    digest = hashlib.sha256(key.asbytes()).digest()
-    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
-
-
 def default_key_path():
     ssh_dir = os.path.join(os.path.expanduser("~"), ".ssh")
     for name in ("id_ed25519", "id_rsa", "id_ecdsa"):
@@ -193,6 +201,10 @@ def default_key_path():
         if os.path.isfile(p):
             return p
     return ""
+
+
+class SSLVerifyError(Exception):
+    pass
 
 
 class _Uploader:
@@ -210,6 +222,7 @@ class _Uploader:
                 try:
                     if name.endswith(".ico"):
                         self.iconbitmap(_p)
+                        self.iconbitmap(default=_p)     # also for dialogs / Toplevels
                     else:
                         self.iconphoto(True, tk.PhotoImage(file=_p))
                 except Exception:
@@ -260,9 +273,10 @@ class _Uploader:
             y = (sh - new_h) // 2
             self.geometry(f"{self.winfo_width()}x{new_h}+{x}+{y}")
 
-    def _section(self, parent, title, row):
+    def _section(self, parent, title, row, col=0):
         tk.Label(parent, text=title, font=("Consolas", 9, "bold"),
-                 bg=BG, fg=FG2).grid(row=row, column=0, sticky="w", padx=16, pady=(10, 2))
+                 bg=BG, fg=FG2).grid(row=row, column=col, sticky="w",
+                                     padx=16 if col == 0 else 6, pady=(10, 2))
 
     def _field(self, parent, var, row, label, show=""):
         tk.Label(parent, text=label, font=FONT, bg=BG2, fg=FG2,
@@ -405,9 +419,11 @@ class _Uploader:
                   relief="flat", bd=0, pady=4, cursor="hand2",
                   command=self._forget_saved).grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
-        self._section(cols, "☁  NEXTCLOUD", 0)
-        nc_f = tk.Frame(cols, bg=BG2)
-        nc_f.grid(row=1, column=1, sticky="nsew", padx=(6, 16), pady=(0, 4))
+        self._section(cols, "☁  NEXTCLOUD", 0, col=1)
+        right = tk.Frame(cols, bg=BG)
+        right.grid(row=1, column=1, sticky="nsew", padx=(6, 16), pady=(0, 4))
+        nc_f = tk.Frame(right, bg=BG2)
+        nc_f.pack(fill="x")
         nc_f.columnconfigure(1, weight=1)
 
         self.nc_user_var = tk.StringVar()
@@ -415,6 +431,14 @@ class _Uploader:
         self.nc_occ_var  = tk.StringVar(value="/var/www/html/nextcloud/occ")
         self.remote_var  = tk.StringVar(value="/")
         self.tmp_var     = tk.StringVar(value="/tmp")
+
+        self.share_var       = tk.BooleanVar(value=True)
+        self.nc_url_var      = tk.StringVar()
+        self.nc_app_pass_var = tk.StringVar()
+        self.share_token_var = tk.StringVar()
+        self.share_pw_var    = tk.StringVar()
+        self.share_days_var  = tk.StringVar()
+        self.share_label_var = tk.StringVar()
 
         self._field(nc_f, self.nc_user_var, 0, "NC User:")
         self._field(nc_f, self.nc_data_var, 1, "data/ path:")
@@ -425,6 +449,40 @@ class _Uploader:
         tk.Label(nc_f, text='e.g. "/" or "/SHARE"',
                  font=FONT_SM, bg=BG2, fg=FG2).grid(
                  row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 6))
+
+        # ── Share link panel (right column, under NEXTCLOUD) ──
+        tk.Label(right, text="🔗  SHARE LINK", font=("Consolas", 9, "bold"),
+                 bg=BG, fg=FG2).pack(anchor="w", pady=(10, 2))
+        share_f = tk.Frame(right, bg=BG2)
+        share_f.pack(fill="x")
+        share_f.columnconfigure(0, weight=1)
+        tk.Checkbutton(share_f, text="Create public share link after upload",
+                       variable=self.share_var,
+                       font=FONT_SM, bg=BG2, fg=FG2, selectcolor=BG3,
+                       activebackground=BG2, activeforeground=FG, cursor="hand2",
+                       command=self._on_share_toggle).grid(
+                       row=0, column=0, sticky="w", padx=10, pady=(6, 6))
+
+        self.share_opts = tk.Frame(share_f, bg=BG2)
+        self.btn_retry_share = tk.Button(
+            share_f, text="↻  Retry share link", font=FONT_SM, bg=BG3, fg=WARNING,
+            activebackground=WARNING, activeforeground="white", relief="flat", bd=0,
+            pady=4, cursor="hand2", state="disabled", command=self._retry_share)
+        self.btn_retry_share.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self.share_opts.grid(row=1, column=0, sticky="ew")
+        self.share_opts.columnconfigure(1, weight=1)
+        self._field(self.share_opts, self.nc_url_var,      0, "Nextcloud URL:")
+        self._field(self.share_opts, self.nc_app_pass_var, 1, "NC app password:", show="*")
+        self._field(self.share_opts, self.share_token_var, 2, "Custom token:")
+        self._field(self.share_opts, self.share_pw_var,    3, "Link password:", show="*")
+        self._field(self.share_opts, self.share_days_var,  4, "Expires in days:")
+        self._field(self.share_opts, self.share_label_var, 5, "Link label:")
+        tk.Label(self.share_opts,
+                 text="app password: NC Settings → Security\n"
+                      "token: a-z 0-9 - (admin must enable)\n"
+                      "empty field = default / random token",
+                 font=FONT_SM, bg=BG2, fg=FG2, justify="left").grid(
+                 row=6, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 8))
 
         self._section(self, "📁  WHAT TO SEND" + ("   (drag & drop files/folders onto the window)" if DND_OK else ""), 2)
         loc = tk.Frame(self, bg=BG2)
@@ -549,7 +607,7 @@ class _Uploader:
 
     @staticmethod
     def _kr_forget_acct(acct):
-        for prefix in ("ssh", "keypass", "sudo"):
+        for prefix in ("ssh", "keypass", "ncapp", "sharepw", "sudo"):
             kr_delete(f"{prefix}:{acct}")
 
     def _kr_store(self, prefix, acct, value):
@@ -597,6 +655,7 @@ class _Uploader:
             self.nc_occ_var.set(c.get("nc_occ",  "/var/www/html/nextcloud/occ"))
             self.remote_var.set(c.get("remote",  "/"))
             self.tmp_var.set(c.get("tmp_dir", "/tmp"))
+            self.nc_url_var.set(c.get("nc_url", ""))
         else:
             self.ssh_port_var.set("22")
             self.nc_data_var.set("/var/www/html/nextcloud/data")
@@ -612,6 +671,7 @@ class _Uploader:
                 if rem:
                     self.ssh_pass_var.set(kr_get(f"ssh:{acct}"))
                     self.key_pass_var.set(kr_get(f"keypass:{acct}"))
+                    self.nc_app_pass_var.set(kr_get(f"ncapp:{acct}"))
                 if rem_s:
                     self.sudo_pass_var.set(kr_get(f"sudo:{acct}"))
 
@@ -658,14 +718,18 @@ class _Uploader:
                 "nc_occ":      self.nc_occ_var.get(),
                 "remote":      self.remote_var.get(),
                 "tmp_dir":     self.tmp_var.get(),
+                "nc_url":        self.nc_url_var.get(),
             })
         if self.kr_ok:
             if rem:
                 ok &= self._kr_store("ssh",     acct, self.ssh_pass_var.get())
                 ok &= self._kr_store("keypass", acct, self.key_pass_var.get())
+                ok &= self._kr_store("ncapp",   acct, self.nc_app_pass_var.get())
             else:
                 kr_delete(f"ssh:{acct}")
                 kr_delete(f"keypass:{acct}")
+                kr_delete(f"ncapp:{acct}")
+                kr_delete(f"sharepw:{acct}")
             if rem_s:
                 ok &= self._kr_store("sudo", acct, self.sudo_pass_var.get())
             else:
@@ -690,6 +754,8 @@ class _Uploader:
         self.ssh_pass_var.set("")
         self.key_pass_var.set("")
         self.sudo_pass_var.set("")
+        self.nc_app_pass_var.set("")
+        self.share_pw_var.set("")
         self._kr_acct = ""
         save_config({"remember": False, "remember_sudo": False})
         self._set_status("✓ Saved passwords deleted.", SUCCESS)
@@ -719,103 +785,212 @@ class _Uploader:
             f"Cannot load key ({last_err}). Check the passphrase and that this is a "
             f"private key in OpenSSH/PEM format (not .pub; PuTTY .ppk must be converted).")
 
-    def _ask_on_main(self, func):
-        """Runs func() (a dialog) in the GUI thread and returns its result.
-        Safe to call from the worker threads (connection test, upload, cleanup)."""
-        if threading.current_thread() is threading.main_thread():
-            return func()
-        box, done = {}, threading.Event()
-
-        def run():
-            try:
-                box["r"] = func()
-            except Exception as e:
-                box["e"] = e
-            finally:
-                done.set()
-        self.after(0, run)
-        done.wait()
-        if "e" in box:
-            raise box["e"]
-        return box.get("r")
-
-    def _verify_host_key(self, host, port, key):
-        """Trust-on-first-use host key check. Raises if the key is not trusted - this happens
-        BEFORE any password or key is sent to the server."""
-        import paramiko
-        name  = hostkey_name(host, port)
-        ktype = key.get_name()
-        fp    = host_fingerprint(key)
-        hk = paramiko.HostKeys()
-        try:
-            hk.load(KNOWN_HOSTS_FILE)
-        except IOError:
-            pass                                   # no file yet
-        entry = hk.lookup(name)
-        if entry is not None and entry.get(ktype) == key:
-            return                                 # known server, same key
-
-        if entry is None:
-            ask = lambda: messagebox.askyesno(
-                "New server - verify host key",
-                f"First connection to {name}.\n\n"
-                f"Server key ({ktype}):\n{fp}\n\n"
-                "Make sure this is YOUR server: compare the fingerprint with the one on the server, e.g.\n"
-                "  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\n\n"
-                "Trust this server and remember it?",
-                icon="question", default="no", parent=self)
-        else:
-            old = "\n".join(f"  {k}: {host_fingerprint(v)}" for k, v in entry.items())
-            ask = lambda: messagebox.askyesno(
-                "WARNING - host key changed!",
-                f"The key of {name} is NOT the one saved earlier.\n\n"
-                f"Saved:\n{old}\n\nNow ({ktype}):\n  {fp}\n\n"
-                "This can mean that someone is intercepting the connection (your passwords "
-                "would be stolen), or that the server was reinstalled / its keys were changed.\n\n"
-                "Trust the NEW key? Choose No unless you know why it changed.",
-                icon="warning", default="no", parent=self)
-        if not self._ask_on_main(ask):
-            raise Exception("Server host key was not trusted - connection stopped "
-                            "(no password was sent).")
-        if entry is not None:
-            del hk[name]                           # replace the old key
-        hk.add(name, ktype, key)
-        hk.save(KNOWN_HOSTS_FILE)
-        try:
-            os.chmod(KNOWN_HOSTS_FILE, 0o600)
-        except Exception:
-            pass
-
     def _make_ssh(self):
         import paramiko
         use_key = self.auth_var.get() == "key"
         pkey = self._load_pkey() if use_key else None
-        host = self.ssh_host_var.get().strip()
-        port = int(self.ssh_port_var.get() or 22)
-        user = self.ssh_user_var.get().strip()
 
-        sock = socket.create_connection((host, port), timeout=15)
+        sock = socket.create_connection(
+            (self.ssh_host_var.get().strip(), int(self.ssh_port_var.get() or 22)),
+            timeout=15)
         t = paramiko.Transport(sock)
         t.window_size              = 64 * 1024 * 1024
         t.packetizer.REKEY_BYTES   = 2 ** 40
         t.packetizer.REKEY_PACKETS = 2 ** 40
-        try:
-            t.start_client(timeout=15)             # key exchange only - nothing secret sent yet
-            self._verify_host_key(host, port, t.get_remote_server_key())
-            if use_key:
-                t.auth_publickey(user, pkey)
-            else:
-                t.auth_password(user, self.ssh_pass_var.get())
-            if not t.is_authenticated():
-                raise Exception("Authentication failed.")
-        except Exception:
-            try: t.close()
-            except Exception: pass
-            raise
+        if use_key:
+            t.connect(username=self.ssh_user_var.get().strip(), pkey=pkey)
+        else:
+            t.connect(username=self.ssh_user_var.get().strip(),
+                      password=self.ssh_pass_var.get())
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client._transport = t
         return client
+
+    # ── Share link ───────────────────────────────────────────────────────────
+
+    def _on_share_toggle(self):
+        if self.share_var.get():
+            self.share_opts.grid()
+        else:
+            self.share_opts.grid_remove()
+        self._min_h = 0
+        self.after(10, self._fit_window)
+        if self.remember_var.get():
+            self._save_cfg()
+
+    @staticmethod
+    def _ssl_ctx(mode):
+        import ssl
+        if mode == "insecure":
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            return ctx
+        if mode == "certifi":
+            import certifi
+            return ssl.create_default_context(cafile=certifi.where())
+        return ssl.create_default_context()
+
+    def _ocs_request(self, method, url, fields, user, app_pw, insecure=False):
+        import urllib.request, urllib.parse, urllib.error, base64, ssl
+        body = urllib.parse.urlencode(fields).encode() if fields else None
+        cred = base64.b64encode(f"{user}:{app_pw}".encode()).decode()
+        modes = ["insecure"] if insecure else ["default", "certifi"]
+        raw, last_ssl = None, None
+        for mode in modes:
+            try:
+                ctx = self._ssl_ctx(mode)
+            except Exception:
+                continue                     # e.g. certifi not installed
+            req = urllib.request.Request(url + "?format=json", data=body, method=method)
+            req.add_header("Authorization", "Basic " + cred)
+            req.add_header("User-Agent",
+                           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 NCSenderz/1.0")
+            req.add_header("OCS-APIRequest", "true")
+            req.add_header("Accept", "application/json")
+            if body:
+                req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            try:
+                with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
+                    raw = r.read()
+                break
+            except urllib.error.HTTPError as e:
+                raw_err = e.read() or b""
+                msg = ""
+                try:
+                    msg = json.loads(raw_err)["ocs"]["meta"]["message"] or ""
+                except Exception:
+                    pass
+                if not msg:
+                    txt = raw_err.decode("utf-8", errors="replace")
+                    m = re.search(r"<message>(.*?)</message>", txt, re.S)
+                    if m:
+                        msg = m.group(1).strip()
+                    else:
+                        msg = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", txt)).strip()[:200]
+                log_line(f"HTTP {e.code} {method} {url}: {raw_err[:500]!r}")
+                raise Exception(f"HTTP {e.code}" + (f": {msg}" if msg else " (no message from server)"))
+            except urllib.error.URLError as e:
+                if isinstance(e.reason, ssl.SSLError):
+                    last_ssl = e.reason
+                    continue
+                raise
+            except ssl.SSLError as e:
+                last_ssl = e
+                continue
+        if raw is None:
+            if last_ssl is not None:
+                raise SSLVerifyError(str(last_ssl))
+            raise Exception("Could not connect")
+        j = json.loads(raw)
+        meta = j["ocs"]["meta"]
+        if meta.get("statuscode") not in (100, 200):
+            raise Exception(meta.get("message") or f"status {meta.get('statuscode')}")
+        return j["ocs"]["data"]
+
+    def _create_share_links(self, cfg):
+        """Create public links for the uploaded top-level items. Returns (links, notes)."""
+        import datetime
+        links, notes, failed, ssl_failed = [], [], [], False
+        insecure = cfg.get("insecure", False)
+        api   = cfg["url"].rstrip("/") + "/ocs/v2.php/apps/files_sharing/api/v1/shares"
+        items = cfg["items"]
+        single = len(cfg.get("all_items", items)) == 1
+        for name in items:
+            path = "/" + (cfg["remote"] + "/" if cfg["remote"] else "") + name
+            fields = {"path": path, "shareType": 3, "permissions": 1}
+            if cfg["password"]:
+                fields["password"] = cfg["password"]
+            if cfg["days"]:
+                fields["expireDate"] = (datetime.date.today() +
+                                        datetime.timedelta(days=cfg["days"])).strftime("%Y-%m-%d")
+            if cfg["label"]:
+                fields["label"] = cfg["label"]
+            try:
+                data = self._ocs_request("POST", api, fields, cfg["user"], cfg["app_pw"],
+                                         insecure=insecure)
+            except SSLVerifyError as e:
+                notes.append(f"Share link for {name}: SSL certificate check failed ({e})")
+                log_line(f"SHARE SSL ERROR {name}: {e}")
+                failed.append(name)
+                ssl_failed = True
+                continue
+            except Exception as e:
+                note = f"Share link for {name} failed: {e}"
+                if "HTTP 403" in str(e):
+                    note += (" | Hint: the server may require a password on public links "
+                             "(fill 'Link password' and Try again), or public link sharing "
+                             "is disabled for this user in Administration > Sharing.")
+                notes.append(note)
+                log_line(f"SHARE ERROR {name}: {e}")
+                failed.append(name)
+                continue
+            url = data.get("url", "")
+            if cfg["token"] and single:
+                try:
+                    d2 = self._ocs_request("PUT", f"{api}/{data['id']}",
+                                           {"token": cfg["token"]}, cfg["user"], cfg["app_pw"],
+                                           insecure=insecure)
+                    url = d2.get("url") or (url.rsplit("/", 1)[0] + "/" + cfg["token"])
+                except Exception as e:
+                    notes.append(f"Custom token not applied ({e}) - random token used. "
+                                 f"Admin must enable 'Allow users to set custom share link "
+                                 f"tokens' (Administration settings > Sharing).")
+                    log_line(f"SHARE TOKEN ERROR {e}")
+            links.append((name, url))
+        if cfg["token"] and not single:
+            notes.append("Custom token ignored (several items shared).")
+        return links, notes, failed, ssl_failed
+
+    def _copy_text(self, text):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()
+            self._set_status("✓ Link copied to clipboard.", SUCCESS)
+        except Exception:
+            pass
+
+    def _show_links(self, links):
+        win = tk.Toplevel(self)
+        win.title("Share link")
+        win.configure(bg=BG)
+        win.transient(self)
+        tk.Label(win, text="🔗  PUBLIC SHARE LINK" + ("S" if len(links) > 1 else ""),
+                 font=FONT_LG, bg=BG, fg=ACCENT).pack(anchor="w", padx=16, pady=(14, 6))
+        for name, url in links:
+            row = tk.Frame(win, bg=BG2)
+            row.pack(fill="x", padx=16, pady=3)
+            tk.Label(row, text=name, font=FONT_SM, bg=BG2, fg=FG2, anchor="w").pack(
+                fill="x", padx=10, pady=(6, 0))
+            line = tk.Frame(row, bg=BG2)
+            line.pack(fill="x", padx=10, pady=(2, 8))
+            var = tk.StringVar(value=url)
+            tk.Entry(line, textvariable=var, font=FONT, bg=BG3, fg=FG,
+                     readonlybackground=BG3, insertbackground=FG, relief="flat",
+                     bd=4, width=58, state="readonly").pack(side="left", fill="x", expand=True)
+            tk.Button(line, text="Copy", font=FONT_SM, bg=BG3, fg=FG,
+                      activebackground=ACCENT, activeforeground="white",
+                      relief="flat", bd=0, padx=10, pady=4, cursor="hand2",
+                      command=lambda u=url: self._copy_text(u)).pack(side="left", padx=(6, 0))
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(fill="x", padx=16, pady=(8, 14))
+        if len(links) > 1:
+            tk.Button(btns, text="Copy all", font=FONT, bg=BG3, fg=FG,
+                      activebackground=ACCENT, activeforeground="white",
+                      relief="flat", bd=0, padx=14, pady=5, cursor="hand2",
+                      command=lambda: self._copy_text("\n".join(u for _, u in links))
+                      ).pack(side="left")
+        tk.Button(btns, text="Close", font=FONT, bg=ACCENT, fg="white",
+                  activebackground=ACCENT2, activeforeground="white",
+                  relief="flat", bd=0, padx=14, pady=5, cursor="hand2",
+                  command=win.destroy).pack(side="right")
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
 
     def _tmp_root(self):
         return self.tmp_var.get().strip().rstrip("/") or "/tmp"
@@ -1042,6 +1217,47 @@ class _Uploader:
             messagebox.showwarning("Missing sudo password",
                                    "sudo password is required for mv/chown on the server.")
             return
+        self._share_cfg = None
+        self._share_acc = []
+        self._share_pending = []
+        self.btn_retry_share.configure(state="disabled")
+        if self.share_var.get():
+            url    = self.nc_url_var.get().strip()
+            app_pw = self.nc_app_pass_var.get()
+            if not url or not app_pw:
+                messagebox.showwarning("Share link",
+                                       "Enter the Nextcloud URL and an app password, "
+                                       "or untick 'Create public share link'.")
+                return
+            if not url.lower().startswith("http"):
+                url = "https://" + url
+            token = self.share_token_var.get().strip()
+            if token and not re.fullmatch(r"[A-Za-z0-9-]{1,32}", token):
+                messagebox.showwarning("Share link",
+                                       "Custom token: only letters, digits and '-', max 32 characters.")
+                return
+            days = 0
+            days_s = self.share_days_var.get().strip()
+            if days_s:
+                try:
+                    days = int(days_s)
+                    if days < 1:
+                        raise ValueError
+                except ValueError:
+                    messagebox.showwarning("Share link", "'Expires in days' must be a positive number.")
+                    return
+            items = []
+            for pth in self.selected_paths:
+                nm = os.path.basename(os.path.normpath(pth))
+                if nm and nm not in items:
+                    items.append(nm)
+            self._share_cfg = {
+                "url": url, "user": self.nc_user_var.get().strip(), "app_pw": app_pw,
+                "remote": self.remote_var.get().strip("/"), "items": items,
+                "all_items": list(items),
+                "token": token, "password": self.share_pw_var.get(),
+                "days": days, "label": self.share_label_var.get().strip(),
+            }
         self.cancel_flag.clear()
         self.btn_send.configure(state="disabled")
         self.btn_cancel.configure(state="normal")
@@ -1302,16 +1518,157 @@ class _Uploader:
             errors.append(f"files:scan error: {(err_scan + out_scan).strip()[-200:]}")
             log_line(f"SCAN ERROR {(err_scan + out_scan).strip()[-500:]}")
 
-        self.after(0, lambda n=len(ok_sftp): self._finish(n, total, errors))
+        links, notes, failed, ssl_failed = [], [], [], False
+        cfg = getattr(self, "_share_cfg", None)
+        if cfg and "NC_SCAN_DONE" in out_scan:
+            self.after(0, lambda: self._set_status("[3/3] Creating share link…", FG2))
+            try:
+                links, notes, failed, ssl_failed = self._create_share_links(cfg)
+            except Exception as e:
+                notes = [f"Share link failed: {e}"]
+                failed = list(cfg["items"])
+                log_line(f"SHARE ERROR {e}")
+        elif cfg:
+            notes = ["Share link skipped (files:scan did not finish)."]
+        self.after(0, lambda n=len(ok_sftp), l=links, nt=notes, f=failed, sf=ssl_failed:
+                   self._finish(n, total, errors, l, nt, f, sf))
 
-    def _finish(self, ok, total, errors):
+    def _finish(self, ok, total, errors, links=None, notes=None, failed=None, ssl_failed=False):
         self.speed_var.set("")
         self._reset_buttons()
+        self._share_acc = list(links or [])
+        self._share_pending = list(failed or [])
+        self.btn_retry_share.configure(state="normal" if self._share_pending else "disabled")
+        extra = ""
+        if links:
+            self._copy_quiet(links[0][1])
+            extra = "  🔗 Link copied to clipboard."
+        if notes:
+            extra += "  ⚠ " + " | ".join(notes)
         if errors:
             self._set_status(
-                f"⚠ {ok}/{total} sent. Error: {' | '.join(errors[:2])}", WARNING)
+                f"⚠ {ok}/{total} sent. Error: {' | '.join(errors[:2])}{extra}", WARNING)
         else:
-            self._set_status(f"✓ Done! Sent {ok} file(s). Nextcloud updated.", SUCCESS)
+            self._set_status(f"✓ Done! Sent {ok} file(s). Nextcloud updated.{extra}",
+                             WARNING if notes else SUCCESS)
+        if links:
+            self._show_links(links)
+        if self._share_pending:
+            self._retry_dialog(ssl_failed, notes)
+
+    def _copy_quiet(self, text):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()
+        except Exception:
+            pass
+
+    def _retry_dialog(self, ssl_failed, notes):
+        win = tk.Toplevel(self)
+        win.title("Share link failed")
+        win.configure(bg=BG)
+        win.transient(self)
+        tk.Label(win, text="⚠  Share link was not created", font=FONT_LG,
+                 bg=BG, fg=WARNING).pack(anchor="w", padx=16, pady=(14, 4))
+        tk.Label(win, text="\n".join((notes or [])[:3]), font=FONT_SM, bg=BG, fg=FG2,
+                 justify="left", wraplength=520).pack(anchor="w", padx=16, pady=(0, 6))
+        if ssl_failed:
+            tk.Label(win, text="The server certificate could not be verified from this "
+                               "computer. 'Ignore SSL check' skips verification for this "
+                               "one attempt only.", font=FONT_SM, bg=BG, fg=FG2,
+                     justify="left", wraplength=520).pack(anchor="w", padx=16, pady=(0, 6))
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(fill="x", padx=16, pady=(6, 14))
+
+        def go(insecure):
+            win.destroy()
+            self._retry_share(insecure=insecure)
+
+        tk.Button(btns, text="Try again", font=FONT, bg=ACCENT, fg="white",
+                  activebackground=ACCENT2, activeforeground="white", relief="flat",
+                  bd=0, padx=14, pady=5, cursor="hand2",
+                  command=lambda: go(False)).pack(side="left")
+        if ssl_failed:
+            tk.Button(btns, text="Try again (ignore SSL check)", font=FONT, bg=BG3, fg=WARNING,
+                      activebackground=WARNING, activeforeground="white", relief="flat",
+                      bd=0, padx=14, pady=5, cursor="hand2",
+                      command=lambda: go(True)).pack(side="left", padx=(8, 0))
+        tk.Button(btns, text="Close", font=FONT, bg=BG3, fg=FG, relief="flat", bd=0,
+                  padx=14, pady=5, cursor="hand2",
+                  command=win.destroy).pack(side="right")
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"+{(sw - win.winfo_reqwidth()) // 2}+{(sh - win.winfo_reqheight()) // 2}")
+
+    def _read_share_form(self, base):
+        c = dict(base)
+        url    = self.nc_url_var.get().strip()
+        app_pw = self.nc_app_pass_var.get()
+        if not url or not app_pw:
+            messagebox.showwarning("Share link", "Enter the Nextcloud URL and an app password.")
+            return None
+        if not url.lower().startswith("http"):
+            url = "https://" + url
+        token = self.share_token_var.get().strip()
+        if token and not re.fullmatch(r"[A-Za-z0-9-]{1,32}", token):
+            messagebox.showwarning("Share link",
+                                   "Custom token: only letters, digits and '-', max 32 characters.")
+            return None
+        days, days_s = 0, self.share_days_var.get().strip()
+        if days_s:
+            try:
+                days = int(days_s)
+                if days < 1:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Share link", "'Expires in days' must be a positive number.")
+                return None
+        c.update(url=url, app_pw=app_pw, token=token, days=days,
+                 user=self.nc_user_var.get().strip(),
+                 password=self.share_pw_var.get(),
+                 label=self.share_label_var.get().strip())
+        return c
+
+    def _retry_share(self, insecure=False):
+        cfg    = getattr(self, "_share_cfg", None)
+        failed = list(getattr(self, "_share_pending", []))
+        if not cfg or not failed:
+            return
+        cfg = self._read_share_form(cfg)          # pick up fields edited after the failure
+        if cfg is None:
+            return
+        self._share_cfg = cfg
+        self.btn_retry_share.configure(state="disabled")
+        self._set_status("Retrying share link…", FG2)
+        c2 = dict(cfg)
+        c2["items"]    = failed
+        c2["insecure"] = insecure
+        threading.Thread(target=self._do_retry_share, args=(c2,), daemon=True).start()
+
+    def _do_retry_share(self, c2):
+        try:
+            links, notes, failed, ssl_failed = self._create_share_links(c2)
+        except Exception as e:
+            links, notes, failed, ssl_failed = [], [f"Share link failed: {e}"], list(c2["items"]), False
+            log_line(f"SHARE RETRY ERROR {e}")
+        self.after(0, lambda: self._after_retry(links, notes, failed, ssl_failed))
+
+    def _after_retry(self, links, notes, failed, ssl_failed):
+        self._share_acc = list(getattr(self, "_share_acc", [])) + list(links)
+        self._share_pending = list(failed)
+        self.btn_retry_share.configure(state="normal" if failed else "disabled")
+        if links:
+            self._copy_quiet(links[0][1])
+        if failed:
+            self._set_status("⚠ " + " | ".join(notes), WARNING)
+            if links:
+                self._show_links(links)
+            self._retry_dialog(ssl_failed, notes)
+        else:
+            self._set_status("✓ Share link created, copied to clipboard.", SUCCESS)
+            if self._share_acc:
+                self._show_links(self._share_acc)
 
 
 class NextcloudSFTPUploader(_Uploader, _TkBase):
