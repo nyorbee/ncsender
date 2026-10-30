@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
-Nextcloud SFTP Uploader v24 (built on v23)
-Changes from v23:
+Nextcloud SFTP Uploader v26 (built on v25)
+Changes from v25:
+- Custom token flow: checks the token is free, sets it, reads it back from the server and
+  tests the link. If anything fails, a dialog explains why and asks for another token,
+  which is tested the same way (repeat until it works or you keep the random link)
+Changes in v25 (from v24):
+- Custom token is verified: the real token/URL is read back from the server and the link
+  is opened once to check it works; if it does not, the program reverts to the original
+  random token (a working link is always returned) and says why
+Changes in v24 (from v23):
 - Share API requests send a browser-like User-Agent (Cloudflare error 1010 blocked the
   default "Python-urllib" signature with HTTP 403)
 Changes in v23 (from v22):
@@ -890,10 +898,75 @@ class _Uploader:
             raise Exception(meta.get("message") or f"status {meta.get('statuscode')}")
         return j["ocs"]["data"]
 
+    def _revert_token(self, fix):
+        if not fix.get("orig_token"):
+            return
+        try:
+            self._ocs_request("PUT", f"{fix['api']}/{fix['id']}", {"token": fix["orig_token"]},
+                              fix["user"], fix["app_pw"], insecure=fix["insecure"])
+        except Exception as e:
+            log_line(f"SHARE REVERT ERROR {e}")
+
+    def _apply_token(self, fix, token):
+        """Set + verify a custom token. Returns (url, None) or (None, error).
+        On error the share is left on its original, working random token."""
+        ins  = fix["insecure"]
+        base = fix["orig_url"].rsplit("/", 1)[0]
+        if token == fix["orig_token"]:
+            return fix["orig_url"], None
+        if self._check_link(f"{base}/{token}", ins) is True:
+            return None, f"token '{token}' is already used by another share"
+        try:
+            self._ocs_request("PUT", f"{fix['api']}/{fix['id']}", {"token": token},
+                              fix["user"], fix["app_pw"], insecure=ins)
+            d2 = self._ocs_request("GET", f"{fix['api']}/{fix['id']}", None,
+                                   fix["user"], fix["app_pw"], insecure=ins)
+        except Exception as e:
+            msg = str(e)
+            if "403" in msg:
+                msg += " (admin must enable 'Allow users to set custom share link tokens')"
+            return None, f"the server rejected it: {msg}"
+        if isinstance(d2, list):
+            d2 = d2[0] if d2 else {}
+        real_token = d2.get("token", "")
+        if real_token != token:
+            self._revert_token(fix)
+            return None, f"the server did not save it (it kept '{real_token}')"
+        real_url = d2.get("url") or f"{base}/{real_token}"
+        if self._check_link(real_url, ins) is False:
+            self._revert_token(fix)
+            return None, "the link with this token does not open (404)"
+        return real_url, None
+
+    def _check_link(self, url, insecure=False):
+        """True = link opens, False = 404/410 (dead link), None = could not tell."""
+        import urllib.request, urllib.error, ssl
+        for mode in (["insecure"] if insecure else ["default", "certifi"]):
+            try:
+                ctx = self._ssl_ctx(mode)
+            except Exception:
+                continue
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 NCSenderz/1.0"})
+            try:
+                with urllib.request.urlopen(req, timeout=20, context=ctx):
+                    return True
+            except urllib.error.HTTPError as e:
+                return False if e.code in (404, 410) else None
+            except urllib.error.URLError as e:
+                if isinstance(e.reason, ssl.SSLError):
+                    continue
+                return None
+            except Exception:
+                return None
+        return None
+
     def _create_share_links(self, cfg):
         """Create public links for the uploaded top-level items. Returns (links, notes)."""
         import datetime
         links, notes, failed, ssl_failed = [], [], [], False
+        self._token_fix = None
         insecure = cfg.get("insecure", False)
         api   = cfg["url"].rstrip("/") + "/ocs/v2.php/apps/files_sharing/api/v1/shares"
         items = cfg["items"]
@@ -929,16 +1002,17 @@ class _Uploader:
                 continue
             url = data.get("url", "")
             if cfg["token"] and single:
-                try:
-                    d2 = self._ocs_request("PUT", f"{api}/{data['id']}",
-                                           {"token": cfg["token"]}, cfg["user"], cfg["app_pw"],
-                                           insecure=insecure)
-                    url = d2.get("url") or (url.rsplit("/", 1)[0] + "/" + cfg["token"])
-                except Exception as e:
-                    notes.append(f"Custom token not applied ({e}) - random token used. "
-                                 f"Admin must enable 'Allow users to set custom share link "
-                                 f"tokens' (Administration settings > Sharing).")
-                    log_line(f"SHARE TOKEN ERROR {e}")
+                fix = {"name": name, "id": data["id"], "api": api,
+                       "orig_token": data.get("token", ""), "orig_url": url,
+                       "user": cfg["user"], "app_pw": cfg["app_pw"], "insecure": insecure}
+                new_url, err = self._apply_token(fix, cfg["token"])
+                if err:
+                    fix["error"] = err
+                    fix["last_token"] = cfg["token"]
+                    self._token_fix = fix
+                    log_line(f"SHARE TOKEN ERROR {cfg['token']}: {err}")
+                else:
+                    url = new_url
             links.append((name, url))
         if cfg["token"] and not single:
             notes.append("Custom token ignored (several items shared).")
@@ -1551,7 +1625,10 @@ class _Uploader:
         else:
             self._set_status(f"✓ Done! Sent {ok} file(s). Nextcloud updated.{extra}",
                              WARNING if notes else SUCCESS)
-        if links:
+        fix = getattr(self, "_token_fix", None)
+        if fix and links:
+            self._token_dialog(fix, links)
+        elif links:
             self._show_links(links)
         if self._share_pending:
             self._retry_dialog(ssl_failed, notes)
@@ -1563,6 +1640,72 @@ class _Uploader:
             self.update()
         except Exception:
             pass
+
+    def _token_dialog(self, fix, links):
+        win = tk.Toplevel(self)
+        win.title("Custom token not accepted")
+        win.configure(bg=BG)
+        win.transient(self)
+        tk.Label(win, text="⚠  Custom token was not set", font=FONT_LG,
+                 bg=BG, fg=WARNING).pack(anchor="w", padx=16, pady=(14, 4))
+        err_var = tk.StringVar(value=f"Token '{fix['last_token']}': {fix['error']}.")
+        tk.Label(win, textvariable=err_var, font=FONT_SM, bg=BG, fg=FG2,
+                 justify="left", wraplength=480).pack(anchor="w", padx=16, pady=(0, 6))
+        tk.Label(win, text="Enter another token (letters, digits, '-', max 32):",
+                 font=FONT_SM, bg=BG, fg=FG2).pack(anchor="w", padx=16)
+        tok_var = tk.StringVar()
+        ent = tk.Entry(win, textvariable=tok_var, font=FONT, bg=BG3, fg=FG,
+                       insertbackground=FG, relief="flat", bd=4, width=40)
+        ent.pack(anchor="w", padx=16, pady=(4, 8))
+        ent.focus_set()
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(fill="x", padx=16, pady=(4, 14))
+
+        def keep():
+            win.destroy()
+            self._show_links(links)
+
+        def done(url, err, token):
+            if err:
+                fix["last_token"] = token
+                err_var.set(f"Token '{token}': {err}.")
+                b_try.configure(state="normal")
+                b_keep.configure(state="normal")
+                ent.focus_set()
+                return
+            win.destroy()
+            new = [(n, url if n == fix["name"] else u) for n, u in links]
+            self._share_acc = new
+            self._copy_quiet(url)
+            self._set_status("✓ Custom token set and link tested, copied to clipboard.", SUCCESS)
+            self._show_links(new)
+
+        def go(_=None):
+            tok = tok_var.get().strip()
+            if not re.fullmatch(r"[A-Za-z0-9-]{1,32}", tok):
+                err_var.set("Only letters, digits and '-' are allowed, max 32 characters.")
+                return
+            b_try.configure(state="disabled")
+            b_keep.configure(state="disabled")
+            err_var.set(f"Testing '{tok}'…")
+
+            def work():
+                url, err = self._apply_token(fix, tok)
+                self.after(0, lambda: done(url, err, tok))
+            threading.Thread(target=work, daemon=True).start()
+
+        b_try = tk.Button(btns, text="Try this token", font=FONT, bg=ACCENT, fg="white",
+                          activebackground=ACCENT2, activeforeground="white", relief="flat",
+                          bd=0, padx=14, pady=5, cursor="hand2", command=go)
+        b_try.pack(side="left")
+        b_keep = tk.Button(btns, text="Keep random link", font=FONT, bg=BG3, fg=FG,
+                           relief="flat", bd=0, padx=14, pady=5, cursor="hand2", command=keep)
+        b_keep.pack(side="right")
+        ent.bind("<Return>", go)
+        win.protocol("WM_DELETE_WINDOW", keep)
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"+{(sw - win.winfo_reqwidth()) // 2}+{(sh - win.winfo_reqheight()) // 2}")
 
     def _retry_dialog(self, ssl_failed, notes):
         win = tk.Toplevel(self)
@@ -1662,12 +1805,18 @@ class _Uploader:
             self._copy_quiet(links[0][1])
         if failed:
             self._set_status("⚠ " + " | ".join(notes), WARNING)
-            if links:
+            fix = getattr(self, "_token_fix", None)
+            if fix and links:
+                self._token_dialog(fix, links)
+            elif links:
                 self._show_links(links)
             self._retry_dialog(ssl_failed, notes)
         else:
             self._set_status("✓ Share link created, copied to clipboard.", SUCCESS)
-            if self._share_acc:
+            fix = getattr(self, "_token_fix", None)
+            if fix and links:
+                self._token_dialog(fix, links)
+            elif self._share_acc:
                 self._show_links(self._share_acc)
 
 
