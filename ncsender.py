@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Nextcloud SFTP Uploader v26 (built on v25)
-Changes from v25:
+Nextcloud SFTP Uploader v28 (built on v27)
+Changes from v27:
+- Logo hover: no overlay/outline any more - the half under the mouse is simply brightened
+Changes in v27 (from v26):
+- "Created by IT Guy" logo is split in half: left half -> Facebook, right half -> GitHub;
+  the half under the mouse is highlighted
+Changes in v26 (from v25):
 - Custom token flow: checks the token is free, sets it, reads it back from the server and
   tests the link. If anything fails, a dialog explains why and asks for another token,
   which is tested the same way (repeat until it works or you keep the random link)
@@ -178,6 +183,9 @@ def kr_delete(name):
         pass
 
 
+FACEBOOK_URL = "https://www.facebook.com/ajtiguy"
+GITHUB_URL   = "https://github.com/nyorbee"
+
 LOG_FILE = os.path.join(os.path.expanduser("~"), "NCSender_upload.log")
 
 
@@ -313,9 +321,70 @@ class _Uploader:
         self.btn_cancel.configure(state="disabled")
         self.btn_cleanup.configure(state="normal")
 
-    def _open_facebook(self, _=None):
+    @staticmethod
+    def _logo_half(x, width):
+        """0 = left half, 1 = right half."""
+        return 0 if x < width / 2 else 1
+
+    def _open_url(self, url):
         import webbrowser
-        webbrowser.open("https://www.facebook.com/ajtiguy")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _lighten_half(img, x1, x2, amount=0.15):
+        """Copy of img with columns x1..x2 brightened (transparent pixels stay transparent)."""
+        w, h = img.width(), img.height()
+        out = img.copy()
+        rows, clear = [], []
+        for y in range(h):
+            row = []
+            for x in range(x1, x2):
+                if img.transparency_get(x, y):
+                    row.append("#000000")
+                    clear.append((x, y))
+                    continue
+                v = img.get(x, y)
+                if isinstance(v, str):
+                    v = v.split()
+                r, g, b = (int(c) for c in list(v)[:3])
+                r += int((255 - r) * amount)
+                g += int((255 - g) * amount)
+                b += int((255 - b) * amount)
+                row.append("#%02x%02x%02x" % (r, g, b))
+            rows.append("{" + " ".join(row) + "}")
+        out.put(" ".join(rows), to=(x1, 0))
+        for x, y in clear:
+            out.transparency_set(x, y, True)
+        return out
+
+    def _build_logo(self, parent, img):
+        """Logo banner split in half: left -> Facebook, right -> GitHub; hovered half brightens."""
+        w, h = img.width(), img.height()
+        cv = tk.Canvas(parent, width=w, height=h, bg=BG, bd=0,
+                       highlightthickness=0, cursor="hand2")
+        item = cv.create_image(0, 0, image=img, anchor="nw")
+        try:
+            imgs = [img,
+                    self._lighten_half(img, 0, w // 2),
+                    self._lighten_half(img, w // 2, w)]
+        except Exception:
+            imgs = [img, img, img]            # highlight unavailable -> still clickable
+        self._logo_imgs = imgs                # keep references alive
+        urls = (FACEBOOK_URL, GITHUB_URL)
+        state = {"half": -1}
+
+        def show(half):
+            if half != state["half"]:
+                state["half"] = half
+                cv.itemconfigure(item, image=imgs[half + 1])
+
+        cv.bind("<Motion>", lambda e: show(self._logo_half(e.x, w)))
+        cv.bind("<Leave>",  lambda e: show(-1))
+        cv.bind("<Button-1>", lambda e: self._open_url(urls[self._logo_half(e.x, w)]))
+        return cv
 
     # ── Build UI ─────────────────────────────────────────────────────────────
 
@@ -334,9 +403,7 @@ class _Uploader:
             try:
                 img = tk.PhotoImage(file=_logo_path).subsample(4, 4)
                 self._logo_img = img
-                lbl = tk.Label(hdr, image=img, bg=BG, cursor="hand2")
-                lbl.pack(side="right", padx=(10, 0))
-                lbl.bind("<Button-1>", self._open_facebook)
+                self._build_logo(hdr, img).pack(side="right", padx=(10, 0))
             except Exception:
                 pass
 
