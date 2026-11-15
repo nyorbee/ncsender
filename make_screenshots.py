@@ -170,11 +170,17 @@ d.destroy()
 
 # ── browse share links ───────────────────────────────────────────────────────
 root._open_links_browser({"api": API, "user": "u", "app_pw": "p"})
-pump(2.5)
+pump(1.0)
 w = toplevels()[0]
 w.geometry("+60+60")
 tree = find(w, ttk.Treeview)[0]
+t0 = time.time()
+while not tree.get_children() and time.time() - t0 < 30:      # first HTTPS/SSL setup can take a few seconds
+    pump(0.25)
+pump(0.5)
 kids = tree.get_children()
+if not kids:
+    print("WARNING: the link list did not load - browse.png would be empty")
 if len(kids) > 1:
     tree.selection_set(kids[1])
 pump(0.3)
