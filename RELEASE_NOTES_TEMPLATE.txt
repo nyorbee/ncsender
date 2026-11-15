@@ -7,6 +7,8 @@ New in this version:
 - "Browse..." next to Target folder: choose the destination from a list of your Nextcloud folders
 - Logo banner: left half opens Facebook, right half opens GitHub
 - Server temp dir must be on disk (not tmpfs) for very large files
+- SSH host key verification: confirm the server's fingerprint on first connection; the connection is stopped before any password is sent if the key ever changes
+- The window size is remembered
 
 Download NCSender.exe below. SHA-256: <paste the output of:  certutil -hashfile NCSender.exe SHA256 >
 The exe is not code-signed; Windows SmartScreen / antivirus may warn about it (false positive).

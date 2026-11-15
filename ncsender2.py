@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Nextcloud SFTP Uploader v32 (built on v31)
-Changes from v31:
+Nextcloud SFTP Uploader v33 (built on v32)
+Changes from v32:
+- SSH host key verification is back (it was in v18 and got lost): the first connection to a
+  server asks you to confirm its fingerprint and remembers it
+  (~/.nextcloud_sftp_uploader_known_hosts); if the key of a known server ever changes, the
+  connection is stopped with a warning BEFORE any password is sent
+Changes in v32 (from v31):
 - Share links window: the "Expires" column is wide enough for the whole date
 - The window size is remembered (when you resize it and close the program)
 Changes in v31 (from v30):
@@ -84,7 +89,7 @@ Changes in v11 (from v10):
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
-import os, sys, json, time, socket, secrets, io, re
+import os, sys, json, time, socket, secrets, io, re, base64, hashlib
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".nextcloud_sftp_uploader.json")
 KR_SERVICE  = "NextcloudSFTPUploader"
@@ -199,6 +204,7 @@ FACEBOOK_URL = "https://www.facebook.com/ajtiguy"
 GITHUB_URL   = "https://github.com/nyorbee"
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), "NCSender_upload.log")
+KNOWN_HOSTS_FILE = os.path.join(os.path.expanduser("~"), ".nextcloud_sftp_uploader_known_hosts")
 
 
 def log_line(msg):
@@ -220,6 +226,17 @@ def human_size(n):
 def q(s):
     """Shell single-quote escape."""
     return s.replace("'", "'\\''")
+
+
+def hostkey_name(host, port):
+    """Name under which a server is stored in the known-hosts file (OpenSSH convention)."""
+    return host if int(port) == 22 else f"[{host}]:{port}"
+
+
+def host_fingerprint(key):
+    """SHA256 fingerprint of a host key, in the same format as `ssh-keygen -lf`."""
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
 
 
 def default_key_path():
@@ -901,25 +918,103 @@ class _Uploader:
             f"Cannot load key ({last_err}). Check the passphrase and that this is a "
             f"private key in OpenSSH/PEM format (not .pub; PuTTY .ppk must be converted).")
 
+    def _ask_on_main(self, func):
+        """Runs func() (a dialog) in the GUI thread and returns its result.
+        Safe to call from the worker threads (connection test, upload, cleanup)."""
+        if threading.current_thread() is threading.main_thread():
+            return func()
+        box, done = {}, threading.Event()
+
+        def run():
+            try:
+                box["r"] = func()
+            except Exception as e:
+                box["e"] = e
+            finally:
+                done.set()
+        self.after(0, run)
+        done.wait()
+        if "e" in box:
+            raise box["e"]
+        return box.get("r")
+
+    def _verify_host_key(self, host, port, key):
+        """Trust-on-first-use host key check. Raises if the key is not trusted - this happens
+        BEFORE any password or key is sent to the server."""
+        import paramiko
+        name  = hostkey_name(host, port)
+        ktype = key.get_name()
+        fp    = host_fingerprint(key)
+        hk = paramiko.HostKeys()
+        try:
+            hk.load(KNOWN_HOSTS_FILE)
+        except IOError:
+            pass                                   # no file yet
+        entry = hk.lookup(name)
+        if entry is not None and entry.get(ktype) == key:
+            return                                 # known server, same key
+
+        if entry is None:
+            ask = lambda: messagebox.askyesno(
+                "New server - verify host key",
+                f"First connection to {name}.\n\n"
+                f"Server key ({ktype}):\n{fp}\n\n"
+                "Make sure this is YOUR server: compare the fingerprint with the one on the server, e.g.\n"
+                "  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\n\n"
+                "Trust this server and remember it?",
+                icon="question", default="no", parent=self)
+        else:
+            old = "\n".join(f"  {k}: {host_fingerprint(v)}" for k, v in entry.items())
+            ask = lambda: messagebox.askyesno(
+                "WARNING - host key changed!",
+                f"The key of {name} is NOT the one saved earlier.\n\n"
+                f"Saved:\n{old}\n\nNow ({ktype}):\n  {fp}\n\n"
+                "This can mean that someone is intercepting the connection (your passwords "
+                "would be stolen), or that the server was reinstalled / its keys were changed.\n\n"
+                "Trust the NEW key? Choose No unless you know why it changed.",
+                icon="warning", default="no", parent=self)
+        if not self._ask_on_main(ask):
+            raise Exception("Server host key was not trusted - connection stopped "
+                            "(no password was sent).")
+        if entry is not None:
+            del hk[name]                           # replace the old key
+        hk.add(name, ktype, key)
+        hk.save(KNOWN_HOSTS_FILE)
+        try:
+            os.chmod(KNOWN_HOSTS_FILE, 0o600)
+        except Exception:
+            pass
+
     def _make_ssh(self):
         import paramiko
         use_key = self.auth_var.get() == "key"
         pkey = self._load_pkey() if use_key else None
+        host = self.ssh_host_var.get().strip()
+        port = int(self.ssh_port_var.get() or 22)
+        user = self.ssh_user_var.get().strip()
 
-        sock = socket.create_connection(
-            (self.ssh_host_var.get().strip(), int(self.ssh_port_var.get() or 22)),
-            timeout=15)
+        sock = socket.create_connection((host, port), timeout=15)
         t = paramiko.Transport(sock)
         t.window_size              = 64 * 1024 * 1024
         t.packetizer.REKEY_BYTES   = 2 ** 40
         t.packetizer.REKEY_PACKETS = 2 ** 40
-        if use_key:
-            t.connect(username=self.ssh_user_var.get().strip(), pkey=pkey)
-        else:
-            t.connect(username=self.ssh_user_var.get().strip(),
-                      password=self.ssh_pass_var.get())
+        try:
+            t.start_client(timeout=15)             # key exchange only - nothing secret sent yet
+            self._verify_host_key(host, port, t.get_remote_server_key())
+            if use_key:
+                t.auth_publickey(user, pkey)
+            else:
+                t.auth_password(user, self.ssh_pass_var.get())
+            if not t.is_authenticated():
+                raise Exception("Authentication failed.")
+        except Exception:
+            try:
+                t.close()
+            except Exception:
+                pass
+            raise
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         client._transport = t
         return client
 
