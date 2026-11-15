@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Nextcloud SFTP Uploader v28 (built on v27)
-Changes from v27:
+Nextcloud SFTP Uploader v30 (built on v29)
+Changes from v29:
+- "Browse share links" window: new "Delete link" button (multi-select, asks for confirmation)
+Changes in v29 (from v28):
+- New button "Browse share links": lists ALL existing public links of the NC user (also ones
+  created in the browser), with filter, sorting and Copy link (double-click copies too)
+Changes in v28 (from v27):
 - Logo hover: no overlay/outline any more - the half under the mouse is simply brightened
 Changes in v27 (from v26):
 - "Created by IT Guy" logo is split in half: left half -> Facebook, right half -> GitHub;
@@ -543,7 +548,12 @@ class _Uploader:
             share_f, text="↻  Retry share link", font=FONT_SM, bg=BG3, fg=WARNING,
             activebackground=WARNING, activeforeground="white", relief="flat", bd=0,
             pady=4, cursor="hand2", state="disabled", command=self._retry_share)
-        self.btn_retry_share.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self.btn_retry_share.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 4))
+        self.btn_browse = tk.Button(
+            share_f, text="📋  Browse share links", font=FONT_SM, bg=BG3, fg=FG,
+            activebackground=ACCENT, activeforeground="white", relief="flat", bd=0,
+            pady=4, cursor="hand2", command=self._browse_links)
+        self.btn_browse.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
         self.share_opts.grid(row=1, column=0, sticky="ew")
         self.share_opts.columnconfigure(1, weight=1)
         self._field(self.share_opts, self.nc_url_var,      0, "Nextcloud URL:")
@@ -1707,6 +1717,285 @@ class _Uploader:
             self.update()
         except Exception:
             pass
+
+    # ── Browse existing share links ──────────────────────────────────────────
+
+    def _browse_links(self):
+        url    = self.nc_url_var.get().strip()
+        app_pw = self.nc_app_pass_var.get()
+        user   = self.nc_user_var.get().strip()
+        if not url or not app_pw or not user:
+            if not self.share_var.get():
+                self.share_var.set(True)
+                self._on_share_toggle()
+            messagebox.showwarning("Share links",
+                                   "Enter the Nextcloud URL, NC User and an NC app password first.")
+            return
+        if not url.lower().startswith("http"):
+            url = "https://" + url
+        creds = {"api": url.rstrip("/") + "/ocs/v2.php/apps/files_sharing/api/v1/shares",
+                 "user": user, "app_pw": app_pw}
+        self._open_links_browser(creds)
+
+    def _fetch_public_links(self, creds, insecure=False):
+        data = self._ocs_request("GET", creds["api"], None, creds["user"], creds["app_pw"],
+                                 insecure=insecure)
+        if isinstance(data, dict):
+            data = [data]
+        base = creds["api"].split("/ocs/")[0]
+        rows = []
+        for d in data or []:
+            try:
+                if int(d.get("share_type", -1)) != 3:        # 3 = public link
+                    continue
+            except (TypeError, ValueError):
+                continue
+            path = d.get("path") or d.get("file_target") or ""
+            url  = d.get("url") or (f"{base}/s/{d['token']}" if d.get("token") else "")
+            try:
+                stime = int(d.get("stime") or 0)
+            except (TypeError, ValueError):
+                stime = 0
+            rows.append({
+                "path": path or "/",
+                "dir": d.get("item_type") == "folder",
+                "label": d.get("label") or "",
+                "expires": (d.get("expiration") or "")[:10],
+                "pw": bool(d.get("password") or d.get("share_with")),
+                "url": url, "stime": stime, "id": d.get("id"),
+            })
+        rows.sort(key=lambda r: r["stime"], reverse=True)
+        return rows
+
+    def _open_links_browser(self, creds):
+        win = tk.Toplevel(self)
+        win.title("Share links")
+        win.configure(bg=BG)
+        win.transient(self)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(2, weight=1)
+
+        style = ttk.Style()
+        style.configure("Links.Treeview", background=BG3, fieldbackground=BG3, foreground=FG,
+                        rowheight=24, borderwidth=0, font=FONT_SM)
+        style.map("Links.Treeview", background=[("selected", ACCENT)],
+                  foreground=[("selected", "white")])
+        style.configure("Links.Treeview.Heading", background=BG2, foreground=FG2,
+                        font=("Consolas", 9, "bold"), relief="flat")
+        style.map("Links.Treeview.Heading", background=[("active", BG3)])
+
+        top = tk.Frame(win, bg=BG)
+        top.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 6))
+        top.columnconfigure(1, weight=1)
+        tk.Label(top, text="🔗  PUBLIC SHARE LINKS", font=FONT_LG, bg=BG, fg=ACCENT).grid(
+            row=0, column=0, sticky="w")
+        count_var = tk.StringVar(value="")
+        tk.Label(top, textvariable=count_var, font=FONT_SM, bg=BG, fg=FG2).grid(
+            row=0, column=1, sticky="w", padx=10)
+
+        fr = tk.Frame(win, bg=BG)
+        fr.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        fr.columnconfigure(1, weight=1)
+        tk.Label(fr, text="Filter:", font=FONT_SM, bg=BG, fg=FG2).grid(row=0, column=0)
+        flt = tk.StringVar()
+        ent = tk.Entry(fr, textvariable=flt, font=FONT, bg=BG3, fg=FG,
+                       insertbackground=FG, relief="flat", bd=4)
+        ent.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        btn_refresh = tk.Button(fr, text="↻ Refresh", font=FONT_SM, bg=BG3, fg=FG,
+                                activebackground=ACCENT, activeforeground="white",
+                                relief="flat", bd=0, padx=10, pady=4, cursor="hand2")
+        btn_refresh.grid(row=0, column=2)
+
+        tf = tk.Frame(win, bg=BG3)
+        tf.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 6))
+        tf.columnconfigure(0, weight=1)
+        tf.rowconfigure(0, weight=1)
+        cols = ("path", "label", "expires", "pw", "url")
+        tree = ttk.Treeview(tf, columns=cols, show="headings", style="Links.Treeview",
+                            selectmode="extended")
+        for c, title, wd, anc in (("path", "Name / path", 260, "w"), ("label", "Label", 110, "w"),
+                                  ("expires", "Expires", 82, "w"), ("pw", "🔒", 34, "center"),
+                                  ("url", "Link", 300, "w")):
+            tree.heading(c, text=title)
+            tree.column(c, width=wd, anchor=anc, stretch=(c in ("path", "url")))
+        tree.grid(row=0, column=0, sticky="nsew")
+        sb = tk.Scrollbar(tf, command=tree.yview, bg=BG3)
+        sb.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=sb.set)
+
+        bottom = tk.Frame(win, bg=BG)
+        bottom.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
+        bottom.columnconfigure(0, weight=1)
+        msg = tk.StringVar(value="")
+        msg_lbl = tk.Label(bottom, textvariable=msg, font=FONT_SM, bg=BG, fg=FG2,
+                           anchor="w", justify="left", wraplength=560)
+        msg_lbl.grid(row=0, column=0, sticky="ew")
+        b_copy = tk.Button(bottom, text="Copy link", font=FONT, bg=ACCENT, fg="white",
+                           activebackground=ACCENT2, activeforeground="white", relief="flat",
+                           bd=0, padx=14, pady=5, cursor="hand2")
+        b_copy.grid(row=0, column=1, padx=(8, 0))
+        b_del = tk.Button(bottom, text="🗑 Delete link", font=FONT, bg=BG3, fg=ERROR,
+                          activebackground=ERROR, activeforeground="white", relief="flat",
+                          bd=0, padx=14, pady=5, cursor="hand2")
+        b_del.grid(row=0, column=2, padx=(8, 0))
+        tk.Button(bottom, text="Close", font=FONT, bg=BG3, fg=FG, relief="flat", bd=0,
+                  padx=14, pady=5, cursor="hand2", command=win.destroy).grid(
+                  row=0, column=3, padx=(8, 0))
+
+        state = {"rows": [], "sort": ("stime", True), "urls": {}, "ids": {}}
+
+        def say(text, color=FG2):
+            if win.winfo_exists():
+                msg.set(text)
+                msg_lbl.configure(fg=color)
+
+        def refill():
+            needle = flt.get().strip().lower()
+            tree.delete(*tree.get_children())
+            state["urls"] = {}
+            state["ids"] = {}
+            key, desc = state["sort"]
+            rows = sorted(state["rows"], key=lambda r: (str(r.get(key, "")).lower()
+                                                        if key != "stime" else r["stime"]),
+                          reverse=desc)
+            shown = 0
+            for i, r in enumerate(rows):
+                hay = f"{r['path']} {r['label']} {r['url']}".lower()
+                if needle and needle not in hay:
+                    continue
+                iid = str(i)
+                tree.insert("", "end", iid=iid, values=(
+                    ("📁 " if r["dir"] else "📄 ") + r["path"], r["label"], r["expires"],
+                    "🔒" if r["pw"] else "", r["url"]))
+                state["urls"][iid] = r["url"]
+                state["ids"][iid] = r.get("id")
+                shown += 1
+            count_var.set(f"{shown} of {len(state['rows'])} link(s)")
+
+        def sort_by(col):
+            key = {"path": "path", "label": "label", "expires": "expires", "pw": "pw",
+                   "url": "url"}[col]
+            desc = (not state["sort"][1]) if state["sort"][0] == key else False
+            state["sort"] = (key, desc)
+            refill()
+
+        for c in cols:
+            tree.heading(c, command=lambda c=c: sort_by(c))
+
+        def copy_selected(_=None):
+            urls = [state["urls"][i] for i in tree.selection() if state["urls"].get(i)]
+            if not urls:
+                say("Select a link first.", WARNING)
+                return
+            self._copy_quiet("\n".join(urls))
+            say(f"✓ Copied {len(urls)} link(s) to clipboard.", SUCCESS)
+
+        def delete_selected(_=None):
+            sel = [i for i in tree.selection() if state["ids"].get(i)]
+            if not sel:
+                say("Select a link to delete first.", WARNING)
+                return
+            names = [tree.set(i, "path").lstrip("📁📄 ") for i in sel]
+            shown = "\n".join(names[:8]) + (f"\n… and {len(names) - 8} more" if len(names) > 8 else "")
+            if not messagebox.askyesno(
+                    "Delete share link",
+                    f"Stop sharing {len(sel)} link(s)?\n\n{shown}\n\n"
+                    "The files stay on the server; only the public link stops working "
+                    "and cannot be restored.", icon="warning", parent=win):
+                return
+            ids = [state["ids"][i] for i in sel]
+            b_del.configure(state="disabled")
+            say("Deleting…")
+
+            def work():
+                done, errs, ssl_err = [], [], None
+                for sid in ids:
+                    try:
+                        self._ocs_request("DELETE", f"{creds['api']}/{sid}", None,
+                                          creds["user"], creds["app_pw"],
+                                          insecure=state.get("insecure", False))
+                        done.append(sid)
+                    except SSLVerifyError as e:
+                        ssl_err = str(e)
+                        break
+                    except Exception as e:
+                        errs.append(str(e))
+                self.after(0, lambda: deleted(done, errs, ssl_err))
+            threading.Thread(target=work, daemon=True).start()
+
+        def deleted(done, errs, ssl_err):
+            if not win.winfo_exists():
+                return
+            b_del.configure(state="normal")
+            state["rows"] = [r for r in state["rows"] if r.get("id") not in done]
+            refill()
+            if ssl_err:
+                say(f"⚠ SSL certificate check failed: {ssl_err[:150]}", ERROR)
+            elif errs:
+                say(f"✓ Deleted {len(done)}, ⚠ failed {len(errs)}: {errs[0]}", ERROR)
+            else:
+                say(f"✓ Deleted {len(done)} link(s).", SUCCESS)
+
+        def loaded(rows):
+            if not win.winfo_exists():
+                return
+            state["rows"] = rows
+            btn_refresh.configure(state="normal")
+            refill()
+            say("Select a link and click 'Copy link' (or double-click it)." if rows
+                else "No public links found for this user.", FG2)
+
+        def failed(err):
+            if not win.winfo_exists():
+                return
+            btn_refresh.configure(state="normal")
+            say(f"⚠ {err}", ERROR)
+
+        def ssl_failed(err):
+            if not win.winfo_exists():
+                return
+            btn_refresh.configure(state="normal")
+            if messagebox.askyesno("SSL certificate",
+                                   "The server certificate could not be verified:\n"
+                                   f"{err[:200]}\n\nIgnore the SSL check for this one request?",
+                                   parent=win):
+                state["insecure"] = True
+                load(True)
+            else:
+                say("⚠ SSL certificate check failed.", ERROR)
+
+        def load(insecure=False):
+            say("Loading links from Nextcloud…")
+            btn_refresh.configure(state="disabled")
+
+            def work():
+                try:
+                    rows = self._fetch_public_links(creds, insecure)
+                except SSLVerifyError as e:
+                    self.after(0, lambda m=str(e): ssl_failed(m))
+                    return
+                except Exception as e:
+                    self.after(0, lambda m=str(e): failed(m))
+                    return
+                self.after(0, lambda: loaded(rows))
+            threading.Thread(target=work, daemon=True).start()
+
+        flt.trace_add("write", lambda *a: refill())
+        btn_refresh.configure(command=lambda: load())
+        b_copy.configure(command=copy_selected)
+        b_del.configure(command=delete_selected)
+        tree.bind("<Delete>", delete_selected)
+        tree.bind("<Double-1>", copy_selected)
+        tree.bind("<Return>", copy_selected)
+        win.bind("<Control-c>", copy_selected)
+
+        win.geometry("960x470")
+        win.minsize(700, 300)
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"960x470+{(sw - 960) // 2}+{(sh - 470) // 2}")
+        ent.focus_set()
+        load()
 
     def _token_dialog(self, fix, links):
         win = tk.Toplevel(self)

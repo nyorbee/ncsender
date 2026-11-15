@@ -19,6 +19,8 @@ This tool avoids that problem entirely by sending files **directly over SSH/SFTP
 ## Features
 
 - Upload files and folders of any size (tested with 120 GB+); drag & drop onto the window
+- **Public share link right after the upload** – custom token (`/s/mylink`), link password, expiry, label; the token is verified (read back and tested) and the link is copied to the clipboard
+- **Browse all existing public share links** of your Nextcloud user (also ones made in the browser): filter, sort, copy again, or **delete** (stop sharing) one or many at once
 - Login with **password** or **SSH key file** (OpenSSH / PEM, optional passphrase)
 - Progress bar with real-time speed and ETA
 - Automatic `files:scan` after upload – files appear in Nextcloud immediately
@@ -26,7 +28,6 @@ This tool avoids that problem entirely by sending files **directly over SSH/SFTP
 - Configurable **Server temp dir** and a **free-space check** before the upload starts
 - On failure it shows how far it got and how much space is left on the server, and writes a log
 - Clean tmp button – removes leftover temp files if an upload was interrupted
-- SSH host key verification (confirm the fingerprint on first connection; warns if it changes)
 - Remember credentials option – passwords are stored in the **system keyring** (Windows Credential Manager), never in the settings file; "Forget saved passwords" button
 - Cancel button works at any stage
 
@@ -34,7 +35,7 @@ This tool avoids that problem entirely by sending files **directly over SSH/SFTP
 
 ## Download
 
-Go to the [Releases](../../releases) page and download the latest `ncsender.exe`. Check its SHA-256 against the value in the release notes.
+Go to the [Releases](../../releases) page and download the latest `NCSender.exe`. Check its SHA-256 against the value in the release notes.
 
 No installation required – just run the exe.
 
@@ -53,7 +54,9 @@ No installation required – just run the exe.
 - Nextcloud installed (tested with Nextcloud 29–33)
 - User with `sudo` access
 - The web server user is `www-data` (Debian / Ubuntu default). The tool uses it for file ownership and for `occ`; other setups are not supported yet.
-- For the instant move, the temp dir (default `/tmp`) should be on the same filesystem as the Nextcloud data directory (standard on most setups). If it is not, the move becomes a copy – slower and it needs the space twice. Pick another **Server temp dir** if `/tmp` is small.
+- For the instant move, the temp dir should be on the same filesystem as the Nextcloud data directory. If it is not, the move becomes a copy – slower and it needs the space twice.
+- **The temp dir must not be RAM (tmpfs).** On many systems `/tmp` is tmpfs, so very large uploads fail there. Choose a folder on disk, e.g. `~/.nc_tmp`, in **Server temp dir**.
+- Share links need a Nextcloud **app password** (Settings → Security). Custom tokens need the admin option `shareapi_allow_custom_tokens`.
 
 ---
 
@@ -70,7 +73,8 @@ Fill in the fields in the GUI:
 - **data/ path** – path to the Nextcloud data directory, e.g. `/var/www/html/nextcloud/data`
 - **occ path** – path to the Nextcloud occ script, e.g. `/var/www/html/nextcloud/occ`
 - **Target folder** – destination folder inside Nextcloud, e.g. `/Downloads`
-- **Server temp dir** – where files are uploaded first, default `/tmp`
+- **Server temp dir** – where files are uploaded first; use a folder on disk, not tmpfs (see Requirements)
+- **Share link panel** – Nextcloud URL (e.g. `https://cloud.example.com`), NC app password, and optional link password, expiry (days), label and custom token. Only the URL and the passwords are remembered. **Browse share links** lists and deletes existing links.
 
 Use **Test connection** to check SSH and the sudo password.
 
@@ -153,9 +157,6 @@ Run `files:scan` manually on the server:
 sudo -u www-data php /var/www/html/nextcloud/occ files:scan <username> --quiet
 ```
 
-**`Server host key was not trusted`**
-You answered No to the fingerprint question, or the server's key changed. Compare the fingerprint with the one on the server (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`). To reset, delete the server's line from `~/.nextcloud_sftp_uploader_known_hosts`.
-
 **`Key is encrypted`**
 Enter the key passphrase. PuTTY `.ppk` keys must be converted to OpenSSH format first.
 
@@ -166,7 +167,6 @@ Enter the key passphrase. PuTTY `.ppk` keys must be converted to OpenSSH format 
 - Passwords (SSH, key passphrase, sudo) are saved only if you tick the "Remember" boxes, and then **only in the system keyring**. The settings file `~/.nextcloud_sftp_uploader.json` (in your user folder) contains host, user and paths, but no passwords.
 - The sudo password is sent to `sudo` through a pseudo-terminal on the SSH connection.
 - Temp files are created in the temp dir with `chmod 700` (owner-only access); the directory name includes 16 random hex characters.
-- **SSH host key verification.** The first time you connect to a server, ncsender shows its fingerprint (SHA256, same format as `ssh-keygen -lf`) and asks you to confirm it. The key is remembered in `~/.nextcloud_sftp_uploader_known_hosts`. If the key of a known server ever changes, the connection is stopped with a warning **before any password is sent**; you can then choose to trust the new key (e.g. after reinstalling the server) or abort. To forget a server, delete its line from that file.
 - `sudo` means root on your server. Use a dedicated account if you can.
 
 ---
@@ -174,12 +174,12 @@ Enter the key passphrase. PuTTY `.ppk` keys must be converted to OpenSSH format 
 ## Run from source
 
 ```
-pip install paramiko keyring tkinterdnd2
-python ncsender.py
+pip install -r requirements.txt
+python ncsender2.py
 ```
 Needs Python 3 with Tk. Optional files next to the script: `icon.ico` / `icon.png` (window icon) and `created.png` (the logo in the header; clicking it opens the author's page).
 
-The release exe is built with [Nuitka](https://nuitka.net/) (one-file, no console window).
+Share links also use `certifi` for HTTPS checks. The release exe is built with [Nuitka](https://nuitka.net/) (one-file, no console window).
 
 ---
 

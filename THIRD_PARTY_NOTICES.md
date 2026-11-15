@@ -1,7 +1,7 @@
 # Third-party software
 
 ncsender's own code is under the MIT license (see `LICENSE`). It uses the Python libraries below. The source repository does
-not contain them. The release `ncsender.exe` is built with Nuitka and **does contain them** (compiled in), so their licenses
+not contain them. The release `NCSender.exe` is built with Nuitka and **does contain them** (compiled in), so their licenses
 apply to the exe.
 
 License information read from the package metadata on PyPI (Python 3.13, win_amd64), checked 2026-10-27:
@@ -11,6 +11,7 @@ License information read from the package metadata on PyPI (Python 3.13, win_amd
 | paramiko | SSH / SFTP | LGPL-2.1 |
 | keyring | system keyring (Windows Credential Manager) | MIT |
 | tkinterdnd2 | drag & drop | MIT |
+| certifi | CA certificates for share-link HTTPS checks | MPL-2.0 |
 | bcrypt, PyNaCl | crypto used by paramiko | Apache-2.0 |
 | cryptography | crypto used by paramiko | Apache-2.0 OR BSD-3-Clause |
 | cffi | dependency | MIT-0 |

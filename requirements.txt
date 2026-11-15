@@ -1,0 +1,4 @@
+paramiko
+keyring
+tkinterdnd2
+certifi

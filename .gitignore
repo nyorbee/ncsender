@@ -1,9 +1,13 @@
-  __pycache__/
-  *.pyc
-  .venv/
-  *.build/
-  *.dist/
-  *.onefile-build/
-  *.exe
-  *.log
-  .nextcloud_sftp_uploader*
+__pycache__/
+*.pyc
+.venv/
+*.build/
+*.dist/
+*.onefile-build/
+*.exe
+*.log
+.nextcloud_sftp_uploader*
+fields.txt
+build/
+dist/
+.idea/
