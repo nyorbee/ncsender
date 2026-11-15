@@ -1,0 +1,176 @@
+"""Makes the README screenshots (docs/*.png) from the REAL program, on Windows.
+
+Run from the repo folder:   python make_screenshots.py
+- needs Pillow (pip install pillow) and the same packages as ncsender2.py
+- fills the window with EXAMPLE data only; your saved settings and passwords are never read,
+  changed or deleted (profile redirected to a temp folder, keyring and config writes disabled)
+- captures only the program windows (cropped to the window frame), not your desktop
+- do not touch the mouse/keyboard and keep other windows away until it finishes (~15 s)
+"""
+import os, sys, json, time, tempfile, threading, importlib.util, http.server
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(HERE, "docs")
+os.makedirs(OUT, exist_ok=True)
+
+# never touch the real config / keyring entries
+fake = tempfile.mkdtemp(prefix="ncshots_")
+for k in ("USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA"):
+    os.environ[k] = fake
+
+try:
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+except Exception:
+    ctypes = None
+from PIL import ImageGrab
+import tkinter as tk
+from tkinter import ttk
+
+spec = importlib.util.spec_from_file_location("ncs", os.path.join(HERE, "ncsender2.py"))
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+# hard safety: the config file must be the temp one, and the keyring is made read-nothing/write-nothing
+assert os.path.abspath(m.CONFIG_FILE).startswith(os.path.abspath(fake)), "refusing to run: config path is not the temp one"
+m.kr_set = lambda *a, **k: True
+m.kr_delete = lambda *a, **k: None
+m.kr_get = lambda *a, **k: ""
+m.save_config = lambda *a, **k: None
+
+B = "https://cloud.example.com"
+SHARES = [
+    {"id": "1", "share_type": 3, "path": "/SHARE/Holiday-2026.mp4", "item_type": "file", "label": "for Anna", "expiration": "2026-12-31 00:00:00", "password": "x", "url": f"{B}/s/holiday", "stime": 1763000000},
+    {"id": "2", "share_type": 3, "path": "/SHARE/Photos", "item_type": "folder", "label": "", "expiration": None, "password": None, "url": f"{B}/s/photos-2026", "stime": 1762500000},
+    {"id": "3", "share_type": 3, "path": "/SHARE/Backup-2026.zip", "item_type": "file", "label": "backup", "expiration": "2027-01-15 00:00:00", "password": None, "url": f"{B}/s/k7Xq2mPaVb", "stime": 1762000000},
+    {"id": "4", "share_type": 3, "path": "/Documents/Report.pdf", "item_type": "file", "label": "", "expiration": None, "password": "x", "url": f"{B}/s/q9WzLr4TeY", "stime": 1760000000},
+    {"id": "5", "share_type": 3, "path": "/SHARE/Installer.exe", "item_type": "file", "label": "tools", "expiration": "2026-11-30 00:00:00", "password": None, "url": f"{B}/s/tools", "stime": 1755000000},
+]
+
+
+class H(http.server.BaseHTTPRequestHandler):          # fake Nextcloud share API on localhost
+    def do_GET(self):
+        b = json.dumps({"ocs": {"meta": {"statuscode": 200}, "data": SHARES}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, *a):
+        pass
+
+
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+API = f"http://127.0.0.1:{srv.server_port}/ocs/v2.php/apps/files_sharing/api/v1/shares"
+
+App = getattr(m, "NextcloudSFTPUploaderPlain", None) or m.NextcloudSFTPUploader
+m._Uploader._show_startup_msg = lambda self: None
+root = App()
+
+
+def pump(sec):
+    end = time.time() + sec
+    while time.time() < end:
+        root.update()
+        time.sleep(0.02)
+
+
+def frame_box(w):
+    """Window rectangle including the title bar and borders (Windows), else the client area."""
+    w.update_idletasks()
+    if ctypes is not None:
+        try:
+            from ctypes import wintypes
+            hwnd = ctypes.windll.user32.GetParent(w.winfo_id()) or w.winfo_id()
+            r = wintypes.RECT()
+            ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                wintypes.HWND(hwnd), 9, ctypes.byref(r), ctypes.sizeof(r))   # EXTENDED_FRAME_BOUNDS
+            if r.right > r.left:
+                return (r.left, r.top, r.right, r.bottom)
+        except Exception:
+            pass
+    x, y = w.winfo_rootx(), w.winfo_rooty()
+    return (x, y, x + w.winfo_width(), y + w.winfo_height())
+
+
+def shot(w, name):
+    w.attributes("-topmost", True)
+    w.lift()
+    pump(0.6)
+    ImageGrab.grab(bbox=frame_box(w), all_screens=True).save(os.path.join(OUT, name))
+    print("saved", name)
+
+
+def toplevels():
+    return [x for x in root.winfo_children() if isinstance(x, tk.Toplevel)]
+
+
+def find(w, cls):
+    out = []
+    for c in w.winfo_children():
+        if isinstance(c, cls):
+            out.append(c)
+        out += find(c, cls)
+    return out
+
+
+# ── main window with example data ────────────────────────────────────────────
+root.geometry("+40+40")
+root.ssh_host_var.set("192.168.1.100")
+root.ssh_user_var.set("user")
+root.auth_var.set("key")
+root._on_auth_change()
+root.key_path_var.set(r"C:\Users\you\.ssh\id_ed25519")
+root.sudo_pass_var.set("x" * 16)
+root.remember_var.set(True)
+root.remember_sudo_var.set(True)
+root.nc_user_var.set("user")
+root.remote_var.set("/SHARE")
+root.tmp_var.set("/home/user/.nc_tmp")
+root.nc_url_var.set(B)
+root.nc_app_pass_var.set("x" * 20)
+root.share_token_var.set("holiday")
+root.share_days_var.set("30")
+root.share_label_var.set("for Anna")
+root.local_var.set("3 item(s) selected")
+for n in ("Holiday-2026.mp4  (18.4 GB)", "Backup-2026.zip  (4.2 GB)", "Photos/  (312 files)"):
+    root.file_list.insert("end", n)
+root._set_status("✓ SSH OK  |  ✓ sudo password correct.", m.SUCCESS)
+pump(1.0)
+shot(root, "main.png")
+
+root.progress_var.set(62)
+root._set_status("Uploading Holiday-2026.mp4 (1 / 3)  ·  11.4 / 18.4 GB", m.FG2)
+root.speed_var.set("94.3 MB/s  ·  ETA 1m 14s")
+pump(0.5)
+shot(root, "uploading.png")
+
+# ── share link dialog ────────────────────────────────────────────────────────
+root.progress_var.set(100)
+root._set_status("✓ Done! Sent 3 file(s). Nextcloud updated.", m.SUCCESS)
+root.speed_var.set("")
+root._show_links([("Holiday-2026.mp4", B + "/s/holiday"), ("Backup-2026.zip", B + "/s/k7Xq2mPaVb")])
+pump(0.8)
+d = toplevels()[0]
+d.geometry("+120+120")
+shot(d, "share-link.png")
+d.destroy()
+
+# ── browse share links ───────────────────────────────────────────────────────
+root._open_links_browser({"api": API, "user": "u", "app_pw": "p"})
+pump(2.5)
+w = toplevels()[0]
+w.geometry("+60+60")
+tree = find(w, ttk.Treeview)[0]
+kids = tree.get_children()
+if len(kids) > 1:
+    tree.selection_set(kids[1])
+pump(0.3)
+shot(w, "browse.png")
+
+root.destroy()
+print("Done. New screenshots are in:", OUT)
