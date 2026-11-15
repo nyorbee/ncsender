@@ -6,7 +6,26 @@ Built for home lab setups where the official Nextcloud desktop client struggles 
 
 ---
 
-![ncsender screenshot](screenshots/ncsender.png)
+![Main window](docs/main.png)
+
+<details open>
+<summary>More screenshots</summary>
+
+**Uploading**
+
+![Uploading](docs/uploading.png)
+
+**Share link created after the upload**
+
+![Share link](docs/share-link.png)
+
+**Browse, copy and delete existing share links**
+
+![Browse share links](docs/browse.png)
+
+</details>
+
+*Screenshots use example data.*
 
 ## Why this exists
 
