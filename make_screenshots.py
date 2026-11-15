@@ -123,7 +123,14 @@ def shot(w, name):
     w.attributes("-topmost", True)
     w.lift()
     pump(0.6)
-    ImageGrab.grab(bbox=frame_box(w), all_screens=True).save(os.path.join(OUT, name))
+    img = ImageGrab.grab(bbox=frame_box(w), all_screens=True).convert("RGBA")
+    # make the rounded window corners transparent, so no pixels of your desktop end up in the file
+    from PIL import Image, ImageDraw
+    r = max(8, int(9 * (root.winfo_fpixels("1i") / 96.0)))
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, img.size[0] - 1, img.size[1] - 1), radius=r, fill=255)
+    img.putalpha(mask)
+    img.save(os.path.join(OUT, name))
     print("saved", name)
 
 

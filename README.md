@@ -8,24 +8,9 @@ Built for home lab setups where the official Nextcloud desktop client struggles 
 
 ![Main window](docs/main.png)
 
-<details open>
-<summary>More screenshots</summary>
+![Share link created after the upload](docs/share-link.png)
 
-**Uploading**
-
-![Uploading](docs/uploading.png)
-
-**Share link created after the upload**
-
-![Share link](docs/share-link.png)
-
-**Browse, copy and delete existing share links**
-
-![Browse share links](docs/browse.png)
-
-</details>
-
-*Screenshots use example data.*
+![Browse, edit and delete existing share links](docs/browse.png)
 
 ## Why this exists
 
