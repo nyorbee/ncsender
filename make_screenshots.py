@@ -112,6 +112,12 @@ def frame_box(w):
             ctypes.windll.dwmapi.DwmGetWindowAttribute(
                 wintypes.HWND(hwnd), 9, ctypes.byref(r), ctypes.sizeof(r))   # EXTENDED_FRAME_BOUNDS
             if r.right > r.left:
+                # DWM bounds can reach a few pixels below the visible window (pixels of whatever is
+                # behind it), so take the bottom/sides from Tk's own client size + 1 px border
+                cx, cy = w.winfo_rootx(), w.winfo_rooty()
+                cw, ch = w.winfo_width(), w.winfo_height()
+                if abs(cx - r.left) <= 16 and 0 < cy - r.top < 120:
+                    return (cx - 1, r.top, cx + cw + 1, cy + ch + 1)
                 return (r.left, r.top, r.right, r.bottom)
         except Exception:
             pass

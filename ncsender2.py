@@ -2,6 +2,7 @@
 """
 Nextcloud SFTP Uploader v32 (built on v31)
 Changes from v31:
+- Share links window: the "Expires" column is wide enough for the whole date
 - The window size is remembered (when you resize it and close the program)
 Changes in v31 (from v30):
 - "Browse..." next to Target folder: pick the destination from a list of your Nextcloud folders
@@ -2058,7 +2059,7 @@ class _Uploader:
         tree = ttk.Treeview(tf, columns=cols, show="headings", style="Links.Treeview",
                             selectmode="extended")
         for c, title, wd, anc in (("path", "Name / path", 260, "w"), ("label", "Label", 110, "w"),
-                                  ("expires", "Expires", 82, "w"), ("pw", "🔒", 34, "center"),
+                                  ("expires", "Expires", 108, "w"), ("pw", "🔒", 34, "center"),
                                   ("url", "Link", 300, "w")):
             tree.heading(c, text=title)
             tree.column(c, width=wd, anchor=anc, stretch=(c in ("path", "url")))
