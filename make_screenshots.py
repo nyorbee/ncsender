@@ -72,9 +72,31 @@ m._Uploader._show_startup_msg = lambda self: None
 root = App()
 
 
+# This script drives Tk with its own loop instead of mainloop(), and newer Python versions refuse
+# root.after() calls coming from worker threads in that case. So thread-side after() calls are
+# queued here and run from pump(). (The real program uses mainloop and is not affected.)
+import queue
+_q = queue.Queue()
+_orig_after = root.after
+
+
+def _after(ms, fn=None, *args):
+    if threading.current_thread() is not threading.main_thread():
+        if fn is not None:
+            _q.put((fn, args))
+        return None
+    return _orig_after(ms, fn, *args) if fn is not None else _orig_after(ms)
+
+
+root.after = _after
+
+
 def pump(sec):
     end = time.time() + sec
     while time.time() < end:
+        while not _q.empty():
+            fn, args = _q.get()
+            fn(*args)
         root.update()
         time.sleep(0.02)
 
