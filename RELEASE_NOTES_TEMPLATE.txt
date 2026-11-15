@@ -1,4 +1,4 @@
-NCSender v2.6.0
+NCSender v2.7.0
 
 New in this version:
 - Public share link right after upload: custom token, link password, expiry, label; the token is verified and the link is copied to the clipboard
