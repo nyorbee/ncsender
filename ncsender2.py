@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Nextcloud SFTP Uploader v30 (built on v29)
-Changes from v29:
+Nextcloud SFTP Uploader v31 (built on v30)
+Changes from v30:
+- "Browse..." next to Target folder: pick the destination from a list of your Nextcloud folders
+- Share links window: "Edit link" (change token, password, expiry, label of an existing link)
+  and "Share file/folder" (create a link for something already on the server)
+Changes in v30 (from v29):
 - "Browse share links" window: new "Delete link" button (multi-select, asks for confirmation)
 Changes in v29 (from v28):
 - New button "Browse share links": lists ALL existing public links of the NC user (also ones
@@ -524,6 +528,10 @@ class _Uploader:
         self._field(nc_f, self.nc_data_var, 1, "data/ path:")
         self._field(nc_f, self.nc_occ_var,  2, "occ path:")
         self._field(nc_f, self.remote_var,  3, "Target folder:")
+        tk.Button(nc_f, text="Browse…", font=FONT_SM, bg=BG3, fg=FG,
+                  activebackground=ACCENT, activeforeground="white", relief="flat", bd=0,
+                  padx=8, pady=2, cursor="hand2", command=self._browse_target).grid(
+                  row=3, column=2, padx=(0, 12))
         self._field(nc_f, self.tmp_var,     4, "Server temp dir:")
 
         tk.Label(nc_f, text='e.g. "/" or "/SHARE"',
@@ -1720,7 +1728,7 @@ class _Uploader:
 
     # ── Browse existing share links ──────────────────────────────────────────
 
-    def _browse_links(self):
+    def _nc_creds(self):
         url    = self.nc_url_var.get().strip()
         app_pw = self.nc_app_pass_var.get()
         user   = self.nc_user_var.get().strip()
@@ -1728,14 +1736,227 @@ class _Uploader:
             if not self.share_var.get():
                 self.share_var.set(True)
                 self._on_share_toggle()
-            messagebox.showwarning("Share links",
+            messagebox.showwarning("Nextcloud",
                                    "Enter the Nextcloud URL, NC User and an NC app password first.")
-            return
+            return None
         if not url.lower().startswith("http"):
             url = "https://" + url
-        creds = {"api": url.rstrip("/") + "/ocs/v2.php/apps/files_sharing/api/v1/shares",
-                 "user": user, "app_pw": app_pw}
-        self._open_links_browser(creds)
+        return {"api": url.rstrip("/") + "/ocs/v2.php/apps/files_sharing/api/v1/shares",
+                "user": user, "app_pw": app_pw}
+
+    def _browse_links(self):
+        creds = self._nc_creds()
+        if creds:
+            self._open_links_browser(creds)
+
+    # ── Nextcloud folder/file picker (WebDAV) ───────────────────────────────
+
+    def _dav_list(self, creds, path, insecure=False):
+        """List one folder via WebDAV. Returns [(name, is_dir, size)], folders first."""
+        import urllib.request, urllib.parse, urllib.error, base64, ssl
+        import xml.etree.ElementTree as ET
+        base = creds["api"].split("/ocs/")[0]
+        user = creds["user"]
+        path = "/" + path.strip("/")
+        root_prefix = f"/remote.php/dav/files/{user}"
+        url = base + f"/remote.php/dav/files/{urllib.parse.quote(user)}" + urllib.parse.quote(path)
+        body = (b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/>'
+                b'<d:getcontentlength/></d:prop></d:propfind>')
+        cred = base64.b64encode(f"{user}:{creds['app_pw']}".encode()).decode()
+        raw, last_ssl = None, None
+        for mode in (["insecure"] if insecure else ["default", "certifi"]):
+            try:
+                ctx = self._ssl_ctx(mode)
+            except Exception:
+                continue
+            req = urllib.request.Request(url, data=body, method="PROPFIND")
+            req.add_header("Authorization", "Basic " + cred)
+            req.add_header("Depth", "1")
+            req.add_header("Content-Type", "application/xml")
+            req.add_header("User-Agent",
+                           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 NCSenderz/1.0")
+            try:
+                with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
+                    raw = r.read()
+                break
+            except urllib.error.HTTPError as e:
+                log_line(f"HTTP {e.code} PROPFIND {url}")
+                raise Exception(f"HTTP {e.code}" + (" (folder not found)" if e.code == 404 else ""))
+            except urllib.error.URLError as e:
+                if isinstance(e.reason, ssl.SSLError):
+                    last_ssl = e.reason
+                    continue
+                raise Exception(f"Could not connect: {e.reason}")
+            except ssl.SSLError as e:
+                last_ssl = e
+                continue
+        if raw is None:
+            if last_ssl is not None:
+                raise SSLVerifyError(str(last_ssl))
+            raise Exception("Could not connect")
+        ns = {"d": "DAV:"}
+        out = []
+        for resp in ET.fromstring(raw).findall("d:response", ns):
+            href = urllib.parse.unquote(resp.findtext("d:href", "", ns))
+            i = href.find(root_prefix)
+            rel = href[i + len(root_prefix):] if i >= 0 else href
+            rel = "/" + rel.strip("/")
+            if rel == path or rel == "/" + path.strip("/"):
+                continue                                   # the folder itself
+            is_dir = resp.find(".//d:resourcetype/d:collection", ns) is not None
+            try:
+                size = int(resp.findtext(".//d:getcontentlength", "0", ns) or 0)
+            except ValueError:
+                size = 0
+            out.append((rel.rstrip("/").rsplit("/", 1)[-1], is_dir, size))
+        out.sort(key=lambda t: (not t[1], t[0].lower()))
+        return out
+
+    def _nc_picker(self, creds, start, folders_only, title, on_pick, parent=None):
+        """Modal-ish list browser. on_pick(path, is_dir) is called with the choice."""
+        win = tk.Toplevel(parent or self)
+        win.title(title)
+        win.configure(bg=BG)
+        win.transient(parent or self)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(2, weight=1)
+        st = {"path": "/", "items": [], "insecure": False, "busy": False}
+        path_var = tk.StringVar()
+        tk.Label(win, text=("📁  CHOOSE A FOLDER" if folders_only else "📁  CHOOSE A FILE OR FOLDER"),
+                 font=FONT_LG, bg=BG, fg=ACCENT).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 4))
+        top = tk.Frame(win, bg=BG)
+        top.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        top.columnconfigure(1, weight=1)
+        b_up = tk.Button(top, text="↑ Up", font=FONT_SM, bg=BG3, fg=FG, relief="flat", bd=0,
+                         padx=10, pady=4, cursor="hand2")
+        b_up.grid(row=0, column=0)
+        tk.Label(top, textvariable=path_var, font=FONT, bg=BG3, fg=FG, anchor="w",
+                 padx=8, pady=4).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        lf = tk.Frame(win, bg=BG3)
+        lf.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 6))
+        lf.columnconfigure(0, weight=1)
+        lf.rowconfigure(0, weight=1)
+        lb = tk.Listbox(lf, font=FONT, bg=BG3, fg=FG, selectbackground=ACCENT,
+                        selectforeground="white", relief="flat", bd=0, activestyle="none",
+                        height=14, width=60, exportselection=False)
+        lb.grid(row=0, column=0, sticky="nsew")
+        sb = tk.Scrollbar(lf, command=lb.yview, bg=BG3)
+        sb.grid(row=0, column=1, sticky="ns")
+        lb.configure(yscrollcommand=sb.set)
+        bot = tk.Frame(win, bg=BG)
+        bot.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
+        bot.columnconfigure(0, weight=1)
+        msg = tk.StringVar(value="")
+        msg_lbl = tk.Label(bot, textvariable=msg, font=FONT_SM, bg=BG, fg=FG2, anchor="w",
+                           justify="left", wraplength=380)
+        msg_lbl.grid(row=0, column=0, sticky="ew")
+        b_ok = tk.Button(bot, text=("Select this folder" if folders_only else "Select"), font=FONT,
+                         bg=ACCENT, fg="white", activebackground=ACCENT2, activeforeground="white",
+                         relief="flat", bd=0, padx=14, pady=5, cursor="hand2")
+        b_ok.grid(row=0, column=1, padx=(8, 0))
+        tk.Button(bot, text="Cancel", font=FONT, bg=BG3, fg=FG, relief="flat", bd=0, padx=14,
+                  pady=5, cursor="hand2", command=win.destroy).grid(row=0, column=2, padx=(8, 0))
+
+        def say(t, color=FG2):
+            if win.winfo_exists():
+                msg.set(t)
+                msg_lbl.configure(fg=color)
+
+        def fill(items):
+            if not win.winfo_exists():
+                return
+            st["items"] = items
+            st["busy"] = False
+            lb.delete(0, "end")
+            shown = [i for i in items if i[1] or not folders_only]
+            st["items"] = shown
+            for name, is_dir, size in shown:
+                lb.insert("end", ("📁 " if is_dir else "📄 ") + name)
+            path_var.set(st["path"])
+            say("" if shown else "(empty)", FG2)
+
+        def fail(err, ssl_err=False):
+            if not win.winfo_exists():
+                return
+            st["busy"] = False
+            if ssl_err:
+                if messagebox.askyesno("SSL certificate",
+                                       f"The server certificate could not be verified:\n{err[:200]}\n\n"
+                                       "Ignore the SSL check for this window?", parent=win):
+                    st["insecure"] = True
+                    load(st["path"])
+                    return
+            say(f"⚠ {err}", ERROR)
+
+        def load(path, fallback=True):
+            if st["busy"]:
+                return
+            st["busy"] = True
+            say("Loading…")
+
+            def work():
+                try:
+                    items = self._dav_list(creds, path, st["insecure"])
+                except SSLVerifyError as e:
+                    self.after(0, lambda m=str(e): fail(m, True))
+                    return
+                except Exception as e:
+                    if path != "/" and fallback and "404" in str(e):
+                        st["busy"] = False
+                        self.after(0, lambda: (st.update(path="/"), load("/", False)))
+                        return
+                    self.after(0, lambda m=str(e): fail(m))
+                    return
+                st["path"] = "/" + path.strip("/")
+                self.after(0, lambda: fill(items))
+            threading.Thread(target=work, daemon=True).start()
+
+        def selected():
+            sel = lb.curselection()
+            return st["items"][sel[0]] if sel else None
+
+        def enter(_=None):
+            it = selected()
+            if it and it[1]:
+                load(st["path"].rstrip("/") + "/" + it[0])
+            elif it and not folders_only:
+                choose()
+
+        def up(_=None):
+            if st["path"] != "/":
+                load(st["path"].rstrip("/").rsplit("/", 1)[0] or "/")
+
+        def choose(_=None):
+            it = selected()
+            if folders_only:
+                path = (st["path"].rstrip("/") + "/" + it[0]) if it and it[1] else st["path"]
+                is_dir = True
+            else:
+                if not it:
+                    say("Select a file or folder first.", WARNING)
+                    return
+                path, is_dir = st["path"].rstrip("/") + "/" + it[0], it[1]
+            win.destroy()
+            on_pick(path or "/", is_dir)
+
+        b_up.configure(command=up)
+        b_ok.configure(command=choose)
+        lb.bind("<Double-1>", enter)
+        lb.bind("<Return>", enter)
+        lb.bind("<BackSpace>", up)
+        win.update_idletasks()
+        px, py = (parent or self).winfo_rootx(), (parent or self).winfo_rooty()
+        win.geometry(f"+{px + 60}+{py + 60}")
+        load("/" + start.strip("/") if start and start.strip("/") else "/")
+        return win
+
+    def _browse_target(self):
+        creds = self._nc_creds()
+        if not creds:
+            return
+        self._nc_picker(creds, self.remote_var.get(), True, "Target folder",
+                        lambda path, is_dir: self.remote_var.set(path or "/"))
 
     def _fetch_public_links(self, creds, insecure=False):
         data = self._ocs_request("GET", creds["api"], None, creds["user"], creds["app_pw"],
@@ -1763,6 +1984,7 @@ class _Uploader:
                 "expires": (d.get("expiration") or "")[:10],
                 "pw": bool(d.get("password") or d.get("share_with")),
                 "url": url, "stime": stime, "id": d.get("id"),
+                "token": d.get("token") or url.rstrip("/").rsplit("/", 1)[-1],
             })
         rows.sort(key=lambda r: r["stime"], reverse=True)
         return rows
@@ -1828,21 +2050,23 @@ class _Uploader:
         bottom.columnconfigure(0, weight=1)
         msg = tk.StringVar(value="")
         msg_lbl = tk.Label(bottom, textvariable=msg, font=FONT_SM, bg=BG, fg=FG2,
-                           anchor="w", justify="left", wraplength=560)
-        msg_lbl.grid(row=0, column=0, sticky="ew")
-        b_copy = tk.Button(bottom, text="Copy link", font=FONT, bg=ACCENT, fg="white",
-                           activebackground=ACCENT2, activeforeground="white", relief="flat",
-                           bd=0, padx=14, pady=5, cursor="hand2")
-        b_copy.grid(row=0, column=1, padx=(8, 0))
-        b_del = tk.Button(bottom, text="🗑 Delete link", font=FONT, bg=BG3, fg=ERROR,
-                          activebackground=ERROR, activeforeground="white", relief="flat",
-                          bd=0, padx=14, pady=5, cursor="hand2")
-        b_del.grid(row=0, column=2, padx=(8, 0))
-        tk.Button(bottom, text="Close", font=FONT, bg=BG3, fg=FG, relief="flat", bd=0,
-                  padx=14, pady=5, cursor="hand2", command=win.destroy).grid(
-                  row=0, column=3, padx=(8, 0))
+                           anchor="w", justify="left", wraplength=900)
+        msg_lbl.grid(row=0, column=0, columnspan=6, sticky="ew", pady=(0, 6))
 
-        state = {"rows": [], "sort": ("stime", True), "urls": {}, "ids": {}}
+        def mkbtn(text, col, bg=BG3, fg=FG, active=ACCENT):
+            b = tk.Button(bottom, text=text, font=FONT, bg=bg, fg=fg, activebackground=active,
+                          activeforeground="white", relief="flat", bd=0, padx=14, pady=5,
+                          cursor="hand2")
+            b.grid(row=1, column=col, padx=(0 if col == 0 else 8, 0), sticky="w" if col == 0 else "e")
+            return b
+        b_new = mkbtn("➕ Share file/folder…", 0)
+        b_copy = mkbtn("Copy link", 1, ACCENT, "white", ACCENT2)
+        b_edit = mkbtn("✎ Edit link", 2)
+        b_del = mkbtn("🗑 Delete link", 3, BG3, ERROR, ERROR)
+        mkbtn("Close", 4).configure(command=win.destroy)
+        bottom.columnconfigure(0, weight=1)
+
+        state = {"rows": [], "sort": ("stime", True), "urls": {}, "ids": {}, "byiid": {}}
 
         def say(text, color=FG2):
             if win.winfo_exists():
@@ -1854,6 +2078,7 @@ class _Uploader:
             tree.delete(*tree.get_children())
             state["urls"] = {}
             state["ids"] = {}
+            state["byiid"] = {}
             key, desc = state["sort"]
             rows = sorted(state["rows"], key=lambda r: (str(r.get(key, "")).lower()
                                                         if key != "stime" else r["stime"]),
@@ -1869,6 +2094,7 @@ class _Uploader:
                     "🔒" if r["pw"] else "", r["url"]))
                 state["urls"][iid] = r["url"]
                 state["ids"][iid] = r.get("id")
+                state["byiid"][iid] = r
                 shown += 1
             count_var.set(f"{shown} of {len(state['rows'])} link(s)")
 
@@ -1936,14 +2162,32 @@ class _Uploader:
             else:
                 say(f"✓ Deleted {len(done)} link(s).", SUCCESS)
 
+        def edit_selected(_=None):
+            sel = [i for i in tree.selection() if state["byiid"].get(i)]
+            if len(sel) != 1:
+                say("Select exactly one link to edit.", WARNING)
+                return
+            self._edit_link_dialog(win, creds, state["byiid"][sel[0]], state.get("insecure", False),
+                                   lambda t, c=FG2: (state.update(flash=(t, c)), load(state.get("insecure", False))))
+
+        def share_new():
+            def picked(path, is_dir):
+                self._new_share_dialog(win, creds, path, is_dir, state.get("insecure", False),
+                                       lambda t, c=FG2: (state.update(flash=(t, c)), load(state.get("insecure", False))))
+            self._nc_picker(creds, "/", False, "Share file or folder", picked, parent=win)
+
         def loaded(rows):
             if not win.winfo_exists():
                 return
             state["rows"] = rows
             btn_refresh.configure(state="normal")
             refill()
-            say("Select a link and click 'Copy link' (or double-click it)." if rows
-                else "No public links found for this user.", FG2)
+            flash = state.pop("flash", None)
+            if flash:
+                say(*flash)
+            else:
+                say("Select a link and click 'Copy link' (or double-click it)." if rows
+                    else "No public links found for this user.", FG2)
 
         def failed(err):
             if not win.winfo_exists():
@@ -1984,18 +2228,182 @@ class _Uploader:
         btn_refresh.configure(command=lambda: load())
         b_copy.configure(command=copy_selected)
         b_del.configure(command=delete_selected)
+        b_edit.configure(command=edit_selected)
+        b_new.configure(command=share_new)
         tree.bind("<Delete>", delete_selected)
         tree.bind("<Double-1>", copy_selected)
         tree.bind("<Return>", copy_selected)
         win.bind("<Control-c>", copy_selected)
 
         win.geometry("960x470")
-        win.minsize(700, 300)
+        win.minsize(820, 300)
         win.update_idletasks()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         win.geometry(f"960x470+{(sw - 960) // 2}+{(sh - 470) // 2}")
         ent.focus_set()
         load()
+
+    def _form_dialog(self, parent, title, heading, fields, ok_text, on_ok):
+        """Small form. fields = [(key, label, initial)]; on_ok(values) returns an error text or None."""
+        win = tk.Toplevel(parent)
+        win.title(title)
+        win.configure(bg=BG)
+        win.transient(parent)
+        tk.Label(win, text=heading, font=FONT_LG, bg=BG, fg=ACCENT, anchor="w",
+                 wraplength=460, justify="left").grid(row=0, column=0, columnspan=2, sticky="w",
+                                                      padx=16, pady=(14, 8))
+        vars_, extra = {}, {}
+        for r, (key, label, init) in enumerate(fields, start=1):
+            if key == "rm_pw":
+                v = tk.BooleanVar(value=False)
+                tk.Checkbutton(win, text=label, variable=v, font=FONT_SM, bg=BG, fg=FG2,
+                               selectcolor=BG3, activebackground=BG, activeforeground=FG,
+                               bd=0, highlightthickness=0).grid(row=r, column=1, sticky="w",
+                                                                padx=(6, 16))
+                vars_[key] = v
+                continue
+            tk.Label(win, text=label, font=FONT, bg=BG, fg=FG2, anchor="w").grid(
+                row=r, column=0, sticky="w", padx=(16, 0), pady=3)
+            v = tk.StringVar(value=init)
+            e = tk.Entry(win, textvariable=v, font=FONT, bg=BG3, fg=FG, insertbackground=FG,
+                         relief="flat", bd=4, width=34)
+            e.grid(row=r, column=1, sticky="ew", padx=(6, 16), pady=3)
+            vars_[key] = v
+            extra.setdefault("first", e)
+        err = tk.StringVar(value="")
+        n = len(fields) + 1
+        tk.Label(win, textvariable=err, font=FONT_SM, bg=BG, fg=ERROR, wraplength=460,
+                 justify="left", anchor="w").grid(row=n, column=0, columnspan=2, sticky="w",
+                                                  padx=16, pady=(6, 0))
+        bf = tk.Frame(win, bg=BG)
+        bf.grid(row=n + 1, column=0, columnspan=2, sticky="e", padx=16, pady=(8, 14))
+
+        def go(_=None):
+            vals = {k: v.get() for k, v in vars_.items()}
+            e = on_ok(vals)
+            if e:
+                err.set(e)
+            else:
+                win.destroy()
+        tk.Button(bf, text=ok_text, font=FONT, bg=ACCENT, fg="white", activebackground=ACCENT2,
+                  activeforeground="white", relief="flat", bd=0, padx=14, pady=5,
+                  cursor="hand2", command=go).pack(side="left")
+        tk.Button(bf, text="Cancel", font=FONT, bg=BG3, fg=FG, relief="flat", bd=0, padx=14,
+                  pady=5, cursor="hand2", command=win.destroy).pack(side="left", padx=(8, 0))
+        win.bind("<Return>", go)
+        win.update_idletasks()
+        win.geometry(f"+{parent.winfo_rootx() + 80}+{parent.winfo_rooty() + 80}")
+        if "first" in extra:
+            extra["first"].focus_set()
+        return win
+
+    def _edit_link_dialog(self, parent, creds, row, insecure, done):
+        """Change token / password / expiry / label of an existing public link."""
+        import datetime
+        base_api = creds["api"]
+        fields = [("token", "Token:", row.get("token", "")),
+                  ("pw", "New password:", ""),
+                  ("expires", "Expires (YYYY-MM-DD):", row.get("expires", "")),
+                  ("label", "Label:", row.get("label", ""))]
+        if row.get("pw"):
+            fields.insert(2, ("rm_pw", "Remove the current password", ""))
+
+        def apply(vals):
+            token = vals["token"].strip()
+            if token and not re.fullmatch(r"[A-Za-z0-9-]{1,32}", token):
+                return "Token: only letters, digits and '-', max 32 characters."
+            exp = vals["expires"].strip()
+            if exp:
+                try:
+                    datetime.datetime.strptime(exp, "%Y-%m-%d")
+                except ValueError:
+                    return "Expiry must look like 2026-12-31 (or leave empty for no expiry)."
+            put = {}
+            if vals["label"].strip() != (row.get("label") or ""):
+                put["label"] = vals["label"].strip()
+            if exp != (row.get("expires") or ""):
+                put["expireDate"] = exp
+            if vals.get("rm_pw"):
+                put["password"] = ""
+            elif vals["pw"]:
+                put["password"] = vals["pw"]
+            new_token = token if token and token != row.get("token") else None
+            if not put and not new_token:
+                return "Nothing changed."
+
+            def work():
+                errs, ok = [], []
+                try:
+                    if put:
+                        self._ocs_request("PUT", f"{base_api}/{row['id']}", put, creds["user"],
+                                          creds["app_pw"], insecure=insecure)
+                        ok.append("settings")
+                except Exception as e:
+                    errs.append(str(e))
+                if new_token:
+                    fix = {"name": row["path"], "id": row["id"], "api": base_api,
+                           "orig_token": row.get("token", ""), "orig_url": row["url"],
+                           "user": creds["user"], "app_pw": creds["app_pw"], "insecure": insecure}
+                    try:
+                        url, e = self._apply_token(fix, new_token)
+                    except Exception as ex:
+                        url, e = None, str(ex)
+                    if e:
+                        errs.append(f"token not changed: {e}")
+                    else:
+                        ok.append("token")
+                if errs:
+                    self.after(0, lambda: done("⚠ " + " | ".join(errs) + (
+                        f"  (saved: {', '.join(ok)})" if ok else ""), ERROR))
+                else:
+                    self.after(0, lambda: done(f"✓ Link updated ({', '.join(ok)}).", SUCCESS))
+            threading.Thread(target=work, daemon=True).start()
+            return None
+        self._form_dialog(parent, "Edit link", "✎  EDIT  " + row["path"], fields, "Save", apply)
+
+    def _new_share_dialog(self, parent, creds, path, is_dir, insecure, done):
+        """Create a public link for a file/folder that already exists in Nextcloud."""
+        fields = [("token", "Token (optional):", ""), ("pw", "Password (optional):", ""),
+                  ("days", "Expires in days:", ""), ("label", "Label:", "")]
+
+        def create(vals):
+            token = vals["token"].strip()
+            if token and not re.fullmatch(r"[A-Za-z0-9-]{1,32}", token):
+                return "Token: only letters, digits and '-', max 32 characters."
+            days = 0
+            if vals["days"].strip():
+                try:
+                    days = int(vals["days"])
+                    if days < 1:
+                        raise ValueError
+                except ValueError:
+                    return "'Expires in days' must be a positive number."
+            parent_dir, name = path.rstrip("/").rsplit("/", 1)
+            cfg = {"url": creds["api"].split("/ocs/")[0], "user": creds["user"],
+                   "app_pw": creds["app_pw"], "remote": parent_dir.strip("/"), "items": [name],
+                   "all_items": [name], "password": vals["pw"], "days": days,
+                   "label": vals["label"].strip(), "token": token, "insecure": insecure}
+
+            def work():
+                try:
+                    links, notes, failed, ssl_failed = self._create_share_links(cfg)
+                except Exception as e:
+                    self.after(0, lambda m=str(e): done(f"⚠ {m}", ERROR))
+                    return
+                fix = getattr(self, "_token_fix", None)
+                self._token_fix = None
+                if not links:
+                    self.after(0, lambda: done("⚠ " + (notes[0] if notes else "Could not create the link."), ERROR))
+                    return
+                url = links[0][1]
+                self.after(0, lambda: self._copy_quiet(url))
+                text = f"✓ Link created and copied: {url}"
+                if fix:
+                    text += f"   (token not set: {fix.get('error')}; use Edit link to try another)"
+                self.after(0, lambda: done(text, WARNING if fix else SUCCESS))
+            threading.Thread(target=work, daemon=True).start()
+            return None
+        self._form_dialog(parent, "Share", "🔗  SHARE  " + path, fields, "Create link", create)
 
     def _token_dialog(self, fix, links):
         win = tk.Toplevel(self)
