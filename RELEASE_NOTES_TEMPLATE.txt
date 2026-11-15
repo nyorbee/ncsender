@@ -2,7 +2,9 @@ NCSender v2.6.0
 
 New in this version:
 - Public share link right after upload: custom token, link password, expiry, label; the token is verified and the link is copied to the clipboard
-- "Browse share links": list all existing public links of your Nextcloud user, copy them again or delete them
+- "Browse share links": list all existing public links of your Nextcloud user, copy, edit (token, password, expiry, label) or delete them
+- Share a file or folder that is already on the server
+- "Browse..." next to Target folder: choose the destination from a list of your Nextcloud folders
 - Logo banner: left half opens Facebook, right half opens GitHub
 - Server temp dir must be on disk (not tmpfs) for very large files
 

@@ -39,7 +39,9 @@ This tool avoids that problem entirely by sending files **directly over SSH/SFTP
 
 - Upload files and folders of any size (tested with 120 GB+); drag & drop onto the window
 - **Public share link right after the upload** – custom token (`/s/mylink`), link password, expiry, label; the token is verified (read back and tested) and the link is copied to the clipboard
-- **Browse all existing public share links** of your Nextcloud user (also ones made in the browser): filter, sort, copy again, or **delete** (stop sharing) one or many at once
+- **Browse all existing public share links** of your Nextcloud user (also ones made in the browser): filter, sort, copy again, **edit** (token, password, expiry, label) or **delete** (stop sharing) one or many at once
+- **Share something that is already on the server**: pick any file or folder from your Nextcloud and create a link for it
+- **Target folder picker**: the *Browse…* button next to *Target folder* lists your Nextcloud folders (needs the URL, NC User and app password)
 - Login with **password** or **SSH key file** (OpenSSH / PEM, optional passphrase)
 - Progress bar with real-time speed and ETA
 - Automatic `files:scan` after upload – files appear in Nextcloud immediately
