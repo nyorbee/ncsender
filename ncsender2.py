@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Nextcloud SFTP Uploader v31 (built on v30)
-Changes from v30:
+Nextcloud SFTP Uploader v32 (built on v31)
+Changes from v31:
+- The window size is remembered (when you resize it and close the program)
+Changes in v31 (from v30):
 - "Browse..." next to Target folder: pick the destination from a list of your Nextcloud folders
 - Share links window: "Edit link" (change token, password, expiry, label of an existing link)
   and "Share file/folder" (create a link for something already on the server)
@@ -272,6 +274,7 @@ class _Uploader:
         self._load_saved()
         self._on_auth_change(initial=True)
         self._fit_window()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.deiconify()
         self.after(150, self._show_startup_msg)
 
@@ -282,10 +285,27 @@ class _Uploader:
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w = min(800, sw - 80)
         h = min(self.winfo_reqheight() + 20 + extra_h, sh - 80)
-        if not self._min_h:
+        first = not self._min_h
+        if first:
             self._min_h = h
+            try:                                    # restore the size from the last session
+                sw_s, sh_s = str(self.cfg.get("win_size", "")).split("x")
+                w = max(680, min(int(sw_s), sw - 20))
+                h = max(h, min(int(sh_s), sh - 60))
+            except (ValueError, TypeError):
+                pass
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
         self.minsize(680, self._min_h)
+
+    def _on_close(self):
+        try:                                        # remember the window size (not when maximized)
+            if self.state() == "normal":
+                c = load_config()
+                c["win_size"] = f"{self.winfo_width()}x{self.winfo_height()}"
+                save_config(c)
+        except Exception:
+            pass
+        self.destroy()
 
     def _expand_for_status(self):
         self.update_idletasks()
@@ -827,6 +847,7 @@ class _Uploader:
                 ok &= self._kr_store("sudo", acct, self.sudo_pass_var.get())
             else:
                 kr_delete(f"sudo:{acct}")
+        data["win_size"] = load_config().get("win_size", self.cfg.get("win_size", ""))
         save_config(data)   # never contains passwords
         if not ok:
             self.after(0, lambda: self._set_status(
@@ -850,7 +871,8 @@ class _Uploader:
         self.nc_app_pass_var.set("")
         self.share_pw_var.set("")
         self._kr_acct = ""
-        save_config({"remember": False, "remember_sudo": False})
+        save_config({"remember": False, "remember_sudo": False,
+                     "win_size": load_config().get("win_size", "")})
         self._set_status("✓ Saved passwords deleted.", SUCCESS)
 
     # ── SSH helpers ──────────────────────────────────────────────────────────
