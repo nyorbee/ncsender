@@ -141,6 +141,14 @@ for n in ("Holiday-2026.mp4  (18.4 GB)", "Backup-2026.zip  (4.2 GB)", "Photos/  
     root.file_list.insert("end", n)
 root._set_status("✓ SSH OK  |  ✓ sudo password correct.", m.SUCCESS)
 pump(1.0)
+# the program asks for an 800 px wide window; with display scaling (125 %, 150 %) that is too
+# narrow for the larger fonts, so size it like the real window looks on a scaled screen
+scale = root.winfo_fpixels("1i") / 96.0
+root.update_idletasks()
+ww = max(int(800 * scale), root.winfo_reqwidth() + 20)
+hh = root.winfo_reqheight() + int(20 * scale)
+root.geometry(f"{ww}x{hh}+40+40")
+pump(1.0)
 shot(root, "main.png")
 
 root.progress_var.set(62)
