@@ -36,6 +36,7 @@ This tool avoids that problem entirely by sending files **directly over SSH/SFTP
 - Clean tmp button – removes leftover temp files if an upload was interrupted
 - Remember credentials option – passwords are stored in the **system keyring** (Windows Credential Manager), never in the settings file; "Forget saved passwords" button
 - Cancel button works at any stage
+- Remembers the window size between sessions
 
 ---
 
@@ -70,7 +71,7 @@ No installation required – just run the exe.
 
 Fill in the fields in the GUI:
 
-- **Host** – SSH server IP or hostname, e.g. `192.168.1.100` (on the first connection you will be asked to confirm the server's fingerprint)
+- **Host** – SSH server IP or hostname, e.g. `192.168.1.100`
 - **Port** – SSH port, default `22`
 - **SSH User** – your Linux username
 - **Login with** – *Password*, or *Key file* (browse to your private key; fill in the passphrase if it is encrypted)
@@ -80,7 +81,7 @@ Fill in the fields in the GUI:
 - **occ path** – path to the Nextcloud occ script, e.g. `/var/www/html/nextcloud/occ`
 - **Target folder** – destination folder inside Nextcloud, e.g. `/Downloads`
 - **Server temp dir** – where files are uploaded first; use a folder on disk, not tmpfs (see Requirements)
-- **Share link panel** – Nextcloud URL (e.g. `https://cloud.example.com`), NC app password, and optional link password, expiry (days), label and custom token. Only the URL and the passwords are remembered. **Browse share links** lists and deletes existing links.
+- **Share link panel** – Nextcloud URL (e.g. `https://cloud.example.com`), NC app password, and optional link password, expiry (days), label and custom token. Only the Nextcloud URL and the app password are remembered. **Browse share links** lists, edits and deletes existing links.
 
 Use **Test connection** to check SSH and the sudo password.
 
@@ -173,6 +174,7 @@ Enter the key passphrase. PuTTY `.ppk` keys must be converted to OpenSSH format 
 - Passwords (SSH, key passphrase, sudo) are saved only if you tick the "Remember" boxes, and then **only in the system keyring**. The settings file `~/.nextcloud_sftp_uploader.json` (in your user folder) contains host, user and paths, but no passwords.
 - The sudo password is sent to `sudo` through a pseudo-terminal on the SSH connection.
 - Temp files are created in the temp dir with `chmod 700` (owner-only access); the directory name includes 16 random hex characters.
+- The SSH host key is **not verified**: the program accepts the server's key automatically. Use it on networks you trust.
 - `sudo` means root on your server. Use a dedicated account if you can.
 
 ---
