@@ -125,11 +125,78 @@ def frame_box(w):
     return (x, y, x + w.winfo_width(), y + w.winfo_height())
 
 
+def grab_window(w):
+    """Windows: ask the window itself for its picture (PrintWindow), so not a single pixel of the
+    desktop behind it can end up in the image. Returns an RGB image or None."""
+    if ctypes is None or not hasattr(ctypes, "windll"):
+        return None
+    from ctypes import wintypes
+    from PIL import Image
+    user32, gdi32, dwm = ctypes.windll.user32, ctypes.windll.gdi32, ctypes.windll.dwmapi
+    user32.GetWindowDC.restype = wintypes.HDC
+    user32.GetWindowDC.argtypes = [wintypes.HWND]
+    user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+                                ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+
+    class BIH(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD)]
+
+    w.update_idletasks()
+    hwnd = user32.GetParent(w.winfo_id()) or w.winfo_id()
+    wr, er = wintypes.RECT(), wintypes.RECT()
+    user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(wr))
+    dwm.DwmGetWindowAttribute(wintypes.HWND(hwnd), 9, ctypes.byref(er), ctypes.sizeof(er))
+    W, H = wr.right - wr.left, wr.bottom - wr.top
+    hdc = user32.GetWindowDC(wintypes.HWND(hwnd))
+    mdc = gdi32.CreateCompatibleDC(hdc)
+    bmp = gdi32.CreateCompatibleBitmap(hdc, W, H)
+    old = gdi32.SelectObject(mdc, bmp)
+    try:
+        if not user32.PrintWindow(wintypes.HWND(hwnd), mdc, 2):      # 2 = PW_RENDERFULLCONTENT
+            return None
+        bih = BIH(ctypes.sizeof(BIH), W, -H, 1, 32, 0, 0, 0, 0, 0, 0)
+        buf = ctypes.create_string_buffer(W * H * 4)
+        if not gdi32.GetDIBits(mdc, bmp, 0, H, buf, ctypes.byref(bih), 0):
+            return None
+    finally:
+        gdi32.SelectObject(mdc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mdc)
+        user32.ReleaseDC(wintypes.HWND(hwnd), hdc)
+    img = Image.frombuffer("RGB", (W, H), bytes(buf), "raw", "BGRX", 0, 1)
+    box = (er.left - wr.left, er.top - wr.top, er.right - wr.left, er.bottom - wr.top)
+    img = img.crop(box)
+    lo, hi = img.convert("L").getextrema()
+    return img if hi > 20 else None                                  # all black = capture failed
+
+
 def shot(w, name):
     w.attributes("-topmost", True)
     w.lift()
     pump(0.6)
-    img = ImageGrab.grab(bbox=frame_box(w), all_screens=True).convert("RGBA")
+    img = None
+    try:
+        img = grab_window(w)
+    except Exception as e:
+        print("PrintWindow failed, using screen grab:", e)
+    if img is None:
+        img = ImageGrab.grab(bbox=frame_box(w), all_screens=True)
+    img = img.convert("RGBA")
     # make the rounded window corners transparent, so no pixels of your desktop end up in the file
     from PIL import Image, ImageDraw
     r = max(8, int(9 * (root.winfo_fpixels("1i") / 96.0)))
